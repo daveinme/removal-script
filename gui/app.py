@@ -357,7 +357,7 @@ IOPAINT_ENGINES = {
 }
 
 
-def inpaint_iopaint(rgb, md, engine_key):
+def inpaint_iopaint(rgb, md, engine_key, steps=30):
     """Inpainting tramite IOPaint, che integra e mantiene diversi modelli di
     rimozione con una sola interfaccia. Gestisce da solo il tiling per
     l'alta risoluzione (HDStrategy.CROP), cosa che a mano ci era costata
@@ -379,14 +379,28 @@ def inpaint_iopaint(rgb, md, engine_key):
         # quelli "erase" (lama, mat, migan...) no.
         if "/" in name:
             from iopaint.schema import ModelInfo, ModelType
+            # L'offload su CPU permette di stare nei 12 GB ma e' DRAMMATICO
+            # per la velocita': ~62 s/step contro ~1 s. Su una GPU da 24 GB
+            # va disattivato (VRAM_GB sotto), e PowerPaint scende da mezz'ora
+            # a un paio di minuti.
+            # NIENTE offload su CPU: PowerPaint pesa ~2 GB su disco (fp32),
+            # circa 1.2 GB in fp16 sulla GPU, e SAM 3 viene scaricato prima
+            # del fill — la VRAM c'e' sia sulla 3060 che sulla 4090.
+            # L'offload rimbalzava i pesi su PCIe a ogni passo: 62 s/step
+            # contro ~1 s, cioe' mezz'ora per immagine invece di un minuto.
+            if torch.cuda.is_available():
+                free_gb = torch.cuda.mem_get_info()[0] / 1e9
+                log(f"  VRAM libera: {free_gb:.1f} GB, offload disattivato")
             _IOPAINT[name] = models[name](
                 device=dev,
                 model_info=ModelInfo(name=name, path=name,
                                      model_type=ModelType.DIFFUSERS_SD_INPAINT),
                 enable_controlnet=False,
-                low_mem=True,          # offload: serve sui 12 GB
+                low_mem=False,
                 disable_nsfw=True,
-                cpu_offload=True,
+                cpu_offload=False,
+                sd_cpu_textencoder=False,   # richiesto da PowerPaint
+                controlnet_method=None,
             )
         else:
             _IOPAINT[name] = models[name](device=dev)
@@ -403,8 +417,9 @@ def inpaint_iopaint(rgb, md, engine_key):
         kw.update(
             prompt="", negative_prompt="",
             powerpaint_task=PowerPaintTask.object_remove,  # cancella, non genera
-            sd_steps=30, sd_guidance_scale=7.5, sd_seed=-1,
+            sd_steps=steps, sd_guidance_scale=7.5, sd_seed=-1,
         )
+        log(f"  PowerPaint: task object-remove, {steps} passi")
     req = InpaintRequest(**kw)
     res = model(rgb, md, req)                  # BGR in, BGR out
     res = np.asarray(res, dtype=np.uint8)
@@ -552,7 +567,7 @@ def inpaint_sd15(crop_rgb, crop_mask, prompt=""):
     return np.array(out.resize((w, h), PILImage.LANCZOS))
 
 
-def fill_v3(rgb, mask, dilate_px, alpha=None, use_lama=True, engine="lama", sd_prompt=""):
+def fill_v3(rgb, mask, dilate_px, alpha=None, use_lama=True, engine="lama", sd_prompt="", sd_steps=30):
     """Logica v3: dilatazione uniforme leggera + LaMa sul crop.
 
     v3 e' la versione che nei confronti misurati danneggiava meno il capo.
@@ -594,7 +609,7 @@ def fill_v3(rgb, mask, dilate_px, alpha=None, use_lama=True, engine="lama", sd_p
         return out, md, side
 
     if engine in IOPAINT_ENGINES:
-        return inpaint_iopaint(rgb_out, md, engine), md, 0
+        return inpaint_iopaint(rgb_out, md, engine, sd_steps), md, 0
 
     ys, xs = np.where(md > 0)
     margin = 250
@@ -631,6 +646,7 @@ class RunReq(BaseModel):
     shadow_strength: float = 0.82   # piu' basso = solo ombre molto marcate
     engine: str = "lama"            # "lama" | "sd15" (generativo) | "none" (buco bianco)
     sd_prompt: str = ""             # prompt libero per sd15; vuoto = descrizione generica
+    sd_steps: int = 30              # passi di diffusione (PowerPaint/SD): meno = piu' veloce
 
 
 def run_job(req: RunReq):
@@ -675,7 +691,7 @@ def run_job(req: RunReq):
             log("      pattern sara' plausibile ma diverso da quello reale.")
         t1 = time.time()
         out, md, npatch = fill_v3(rgb, mask, req.dilate_px, alpha if req.use_alpha else None,
-                          engine=req.engine, sd_prompt=req.sd_prompt)
+                          engine=req.engine, sd_prompt=req.sd_prompt, sd_steps=req.sd_steps)
         log(f"  completato in {time.time()-t1:.1f}s")
         if req.engine == "patch":
             log(f"  patch di tessuto clonate dal capo: {npatch}")

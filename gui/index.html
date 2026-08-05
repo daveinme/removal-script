@@ -162,6 +162,12 @@
     <label>Prompt per il generativo (opzionale)</label>
     <input id="sdPrompt" placeholder="es. brown fabric with coffee pot pattern">
   </div>
+  <div id="stepsBox" style="display:none">
+    <label>Passi di diffusione</label>
+    <input id="sdSteps" type="number" min="4" max="60" value="30">
+    <div class="hint">Meno passi = più veloce, qualità inferiore.
+      8-10 per un test rapido, 30 per il risultato finale.</div>
+  </div>
 
   <button id="run">Elabora</button>
   <button class="ghost" id="swap">Confronta con l'altro detector</button>
@@ -229,6 +235,7 @@ function engChanged(){
   const e = $('engine').value;
   $('engHint').innerHTML = ENG_HINTS[e];
   $('sdPromptBox').style.display = e==='sd15' ? 'block' : 'none';
+  $('stepsBox').style.display = (e==='sd15'||e==='iop_powerpaint') ? 'block' : 'none';
 }
 $('engine').onchange = engChanged;
 engChanged();
@@ -245,6 +252,7 @@ $('run').onclick = async ()=>{
     conf:parseFloat($('conf').value), dilate_px:parseInt($('dilate').value),
     use_alpha:$('useAlpha').checked, clean_frags:$('cleanFrags').checked,
     engine:$('engine').value, sd_prompt:$('sdPrompt').value,
+    sd_steps:parseInt($('sdSteps').value)||30,
     catch_shadows:$('catchShadows').checked,
     shadow_strength:parseFloat($('shadowStrength').value)
   };
