@@ -402,9 +402,28 @@ def inpaint_iopaint(rgb, md, engine_key, steps=30):
                 sd_cpu_textencoder=False,   # richiesto da PowerPaint
                 controlnet_method=None,
             )
+            # taglia il picco dell'attenzione (che e' cio' che manda in OOM)
+            # senza il costo del CPU offload
+            pipe = getattr(_IOPAINT[name], "model", None)
+            if pipe is not None:
+                for fn in ("enable_attention_slicing", "enable_vae_slicing",
+                           "enable_vae_tiling"):
+                    try:
+                        getattr(pipe, fn)()
+                    except Exception:
+                        pass
         else:
             _IOPAINT[name] = models[name](device=dev)
     model = _IOPAINT[name]
+
+    import torch as _t
+    total_gb = (_t.cuda.get_device_properties(0).total_memory / 1e9
+                if _t.cuda.is_available() else 0)
+    # Limite di risoluzione per i diffusion. Non e' solo VRAM: PowerPaint e'
+    # basato su SD 1.5, addestrato a 512px — oltre ~1024 la qualita' PEGGIORA
+    # (ripetizioni, artefatti) anche avendo memoria a volonta'. Su 24 GB si
+    # puo' alzare, ma non ha senso arrivare a piena risoluzione.
+    limit = 1536 if total_gb >= 20 else 1024
 
     kw = dict(
         hd_strategy=HDStrategy.CROP,          # ritaglia attorno alla maschera
@@ -414,6 +433,12 @@ def inpaint_iopaint(rgb, md, engine_key, steps=30):
     )
     if engine_key == "iop_powerpaint":
         from iopaint.schema import PowerPaintTask
+        # I diffusion allocano MOLTO piu' del proprio peso: PowerPaint occupa
+        # 2.17 GB ma su un crop 2048px il picco arriva a 9.34 GB (tensori
+        # latenti + attenzione). Su 12 GB va in OOM, quindi si lavora a
+        # risoluzione piu' bassa e si ricampiona. Su 24 GB si puo' alzare.
+        log(f"  diffusion a {limit}px (GPU {total_gb:.0f} GB); il resto del "
+            f"capo resta a piena risoluzione")
         kw.update(
             prompt="", negative_prompt="",
             powerpaint_task=PowerPaintTask.object_remove,  # cancella, non genera
@@ -421,8 +446,41 @@ def inpaint_iopaint(rgb, md, engine_key, steps=30):
         )
         log(f"  PowerPaint: task object-remove, {steps} passi")
     req = InpaintRequest(**kw)
-    res = model(rgb, md, req)                  # BGR in, BGR out
+    work_rgb, work_md = rgb, md
+    if engine_key == "iop_powerpaint":
+        # PowerPaint elabora alla risoluzione dell'immagine che riceve
+        # (height=img_h, width=img_w nel suo forward): le strategie HD di
+        # IOPaint non lo riducono. Su 3000x5000 il picco arriva a 9.3 GB e
+        # va in OOM. Si ritaglia attorno alla maschera e si riduce a `limit`,
+        # poi si reincolla solo l'area mascherata: il resto del capo resta
+        # intatto a piena risoluzione.
+        ys, xs = np.where(md > 0)
+        pad = 200
+        y0, y1 = max(0, ys.min() - pad), min(rgb.shape[0], ys.max() + pad)
+        x0, x1 = max(0, xs.min() - pad), min(rgb.shape[1], xs.max() + pad)
+        crop_rgb, crop_md = rgb[y0:y1, x0:x1], md[y0:y1, x0:x1]
+        ch, cw = crop_rgb.shape[:2]
+        sc = min(1.0, limit / max(ch, cw))
+        if sc < 1.0:
+            nw, nh = (int(cw * sc) // 8) * 8, (int(ch * sc) // 8) * 8
+            work_rgb = cv2.resize(crop_rgb, (nw, nh), interpolation=cv2.INTER_AREA)
+            work_md = cv2.resize(crop_md, (nw, nh), interpolation=cv2.INTER_NEAREST)
+        else:
+            work_rgb, work_md = crop_rgb, crop_md
+        log(f"  crop {cw}x{ch} -> elaborato a {work_rgb.shape[1]}x{work_rgb.shape[0]}")
+
+    res = model(work_rgb, work_md, req)        # BGR in, BGR out
     res = np.asarray(res, dtype=np.uint8)
+
+    if engine_key == "iop_powerpaint":
+        if res.shape[:2] != (ch, cw):
+            res = cv2.resize(res, (cw, ch), interpolation=cv2.INTER_LANCZOS4)
+        full = rgb.copy()
+        sel = crop_md > 0
+        region = full[y0:y1, x0:x1]
+        region[sel] = res[sel]
+        full[y0:y1, x0:x1] = region
+        return full
     if res.shape[:2] != rgb.shape[:2]:
         res = cv2.resize(res, (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_LANCZOS4)
     out = rgb.copy()
