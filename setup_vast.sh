@@ -70,6 +70,19 @@ if [ ! -d modelli/zits_repo ]; then
 fi
 
 # ---------------------------------------------- modelli IOPaint (erase)
+echo "==> PowerPaint (task object-remove) — il piu' promettente da testare"
+$PY_BIN - <<'PY' 2>/dev/null | tail -1
+import torch
+from iopaint.model import models
+try:
+    m = models['Sanster/PowerPaint-V1-stable-diffusion-inpainting'](
+        device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+    print('    PowerPaint scaricato OK')
+    del m; torch.cuda.empty_cache()
+except Exception as e:
+    print('    PowerPaint:', str(e)[:90])
+PY
+
 echo "==> Precarico i modelli IOPaint (MAT, MIGAN, FcF)"
 echo "    Su 24 GB dovrebbero girare tutti, anche quelli che sulla 3060"
 echo "    andavano in out-of-memory."

@@ -348,6 +348,12 @@ IOPAINT_ENGINES = {
     "iop_fcf":   "fcf",     # Fourier CNN, buono sulle strutture
     "iop_zits":  "zits",    # struttura + texture (versione mantenuta)
     "iop_ldm":   "ldm",     # latent diffusion, piu' lento
+    # PowerPaint e' l'unico addestrato SPECIFICAMENTE per l'object removal:
+    # ha un task dedicato ("object-remove") invece di un prompt generico.
+    # E' un diffusion, ma guidato a cancellare e non a generare — quindi in
+    # teoria non dovrebbe ricadere nel difetto di SD 1.5 (che inventava
+    # una gruccia al posto di quella da togliere).
+    "iop_powerpaint": "Sanster/PowerPaint-V1-stable-diffusion-inpainting",
 }
 
 
@@ -368,16 +374,38 @@ def inpaint_iopaint(rgb, md, engine_key):
             _IOPAINT.pop(k)
     free_vram()
     if name not in _IOPAINT:
-        _IOPAINT[name] = models[name](device=torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"))
+        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # I modelli diffusion (PowerPaint) richiedono un ModelInfo esplicito;
+        # quelli "erase" (lama, mat, migan...) no.
+        if "/" in name:
+            from iopaint.schema import ModelInfo, ModelType
+            _IOPAINT[name] = models[name](
+                device=dev,
+                model_info=ModelInfo(name=name, path=name,
+                                     model_type=ModelType.DIFFUSERS_SD_INPAINT),
+                enable_controlnet=False,
+                low_mem=True,          # offload: serve sui 12 GB
+                disable_nsfw=True,
+                cpu_offload=True,
+            )
+        else:
+            _IOPAINT[name] = models[name](device=dev)
     model = _IOPAINT[name]
 
-    req = InpaintRequest(
+    kw = dict(
         hd_strategy=HDStrategy.CROP,          # ritaglia attorno alla maschera
         hd_strategy_crop_trigger_size=1280,
         hd_strategy_crop_margin=196,
         hd_strategy_resize_limit=2048,
     )
+    if engine_key == "iop_powerpaint":
+        from iopaint.schema import PowerPaintTask
+        kw.update(
+            prompt="", negative_prompt="",
+            powerpaint_task=PowerPaintTask.object_remove,  # cancella, non genera
+            sd_steps=30, sd_guidance_scale=7.5, sd_seed=-1,
+        )
+    req = InpaintRequest(**kw)
     res = model(rgb, md, req)                  # BGR in, BGR out
     res = np.asarray(res, dtype=np.uint8)
     if res.shape[:2] != rgb.shape[:2]:
@@ -638,7 +666,8 @@ def run_job(req: RunReq):
                  "none": "nessun fill (buco bianco)",
                  "iop_lama": "LaMa via IOPaint", "iop_mat": "MAT via IOPaint",
                  "iop_migan": "MIGAN via IOPaint", "iop_fcf": "FcF via IOPaint",
-                 "iop_zits": "ZITS via IOPaint", "iop_ldm": "LDM via IOPaint"}
+                 "iop_zits": "ZITS via IOPaint", "iop_ldm": "LDM via IOPaint",
+                 "iop_powerpaint": "PowerPaint (task object-remove)"}
         log(f"Fill: {names.get(req.engine, req.engine)} — dilate {req.dilate_px}px, "
             f"alpha={'si' if req.use_alpha and alpha is not None else 'no'}")
         if req.engine == "sd15":

@@ -66,8 +66,11 @@ FcF lo dimostra: stessa architettura Fourier di LaMa, ma addestramento diverso
 
 ### Da testare sulla 4090 24GB
 
-1. **MAT** e **LDM** — mai visti lavorare davvero, solo OOM
-2. **PowerPaint v2** — l'unico addestrato *specificamente* per object removal
+1. **PowerPaint** (già nel menu, task `object-remove`) — l'unico addestrato
+   *specificamente* per la rimozione oggetti, non un prompt generico.
+   Il più promettente: è un diffusion ma guidato a cancellare, quindi non
+   dovrebbe inventare come SD 1.5
+2. **MAT** e **LDM** — mai visti lavorare davvero, solo OOM
 3. **FLUX.2 Klein 4B** — Apache 2.0, piena risoluzione, ~13 GB.
    Richiede `transformers>=5` che rompe groundingdino: usare un **venv
    separato** (`venv-flux`), passando le maschere come PNG già generate.

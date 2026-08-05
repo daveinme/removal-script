@@ -146,6 +146,7 @@
       <option value="iop_migan">MIGAN — leggero e veloce</option>
       <option value="iop_fcf">FcF — Fourier CNN</option>
       <option value="iop_zits">ZITS (IOPaint) — struttura + texture</option>
+      <option value="iop_powerpaint">PowerPaint — task "object-remove"</option>
       <option value="iop_ldm">LDM — latent diffusion</option>
       <option value="iop_lama">LaMa (IOPaint) — con tiling</option>
     </optgroup>
@@ -216,6 +217,7 @@ const ENG_HINTS = {
   iop_migan: "Leggero e veloce, pensato per la rimozione efficiente. Da provare: nessuna delle analisi lo aveva considerato.",
   iop_fcf: "Fourier CNN. Stessa famiglia di LaMa ma addestramento diverso — buono sulle strutture.",
   iop_zits: "ZITS nella versione mantenuta da IOPaint, con tiling automatico per l'alta risoluzione.",
+  iop_powerpaint: "L'unico addestrato SPECIFICAMENTE per l'object removal: ha un task dedicato \"object-remove\", non un prompt generico. È un diffusion ma guidato a cancellare, quindi non dovrebbe inventare come SD 1.5. Il più promettente da provare.",
   iop_ldm: "Latent Diffusion. Più lento, addestrato però a cancellare e non a generare.",
   iop_lama: "Lo stesso LaMa, ma con il tiling di IOPaint (crop attorno alla maschera). Utile come termine di paragone.",
   zits: "Ricostruisce prima le LINEE strutturali (wireframe), poi la texture. Migliore di LaMa dove un bordo o una costina deve continuare dietro la gruccia — es. il colletto di una maglia. Elabora un crop quadrato attorno alla maschera.",
