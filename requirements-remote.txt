@@ -1,0 +1,55 @@
+# Ambiente per l'istanza GPU remota (Vast / Colab / VPS).
+#
+# Ricostruisce la pipeline di rimozione gruccia su una scheda con piu' VRAM,
+# per testare i modelli che in locale (RTX 3060 12GB) vanno in out-of-memory:
+#   - LDM      chiede ~40 GB a piena risoluzione (nessun tiling)
+#   - MAT      OOM sui crop grandi
+#   - ZITS     OOM via IOPaint
+#   - FLUX.2 Klein 4B  ~13 GB, mai testato (richiede pero' transformers 5.x,
+#              vedi nota in fondo)
+#
+# NON include torch: va installato PRIMA, scegliendo la build CUDA giusta per
+# la GPU dell'istanza. Su Vast le immagini PyTorch ce l'hanno gia'.
+#   verifica:  python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+#   se manca:  pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+
+# --- core ---
+numpy==1.26.4
+opencv-python==4.11.0.86
+Pillow==9.5.0                 # IOPaint richiede <10
+scikit-image==0.24.0
+
+# --- web (la GUI e' una web app: si usa via tunnel SSH, niente API pubbliche) ---
+fastapi==0.108.0
+uvicorn==0.52.1
+python-multipart               # upload drag&drop
+pydantic
+
+# --- detection ---
+ultralytics==8.4.115           # SAM 3
+transformers==4.48.3           # NON aggiornare: >=5 rompe groundingdino
+groundingdino-py==0.4.0        # pipeline storica, solo per confronto
+timm==1.0.28
+
+# --- inpainting ---
+simple-lama-inpainting==0.1.2  # LaMa: resta il migliore per rimuovere
+IOPaint==1.6.0                 # MAT, MIGAN, FcF, ZITS, LDM, PowerPaint...
+diffusers==0.27.2              # versione imposta da IOPaint
+accelerate==1.14.0
+
+# --- utility ---
+huggingface-hub
+python-dotenv
+yacs                           # ZITS
+lpips                          # ZITS
+pandas
+tqdm
+
+# ------------------------------------------------------------------
+# NOTA su FLUX.2 Klein 4B: richiede transformers >= 5.x (usa
+# Qwen3ForCausalLM), che in questo ambiente ROMPE groundingdino.
+# Se lo si vuole testare, creare un venv SEPARATO sull'istanza:
+#     python -m venv venv-flux && venv-flux/bin/pip install -U transformers diffusers
+# Non serve groundingdino li' dentro: le maschere si generano prima con
+# SAM 3 nell'ambiente principale e si passano come file PNG.
+# ------------------------------------------------------------------

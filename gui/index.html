@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Controllo rimozione gruccia — Scout</title>
+<style>
+  :root{
+    --bg:#0d0d0f; --panel:#16161a; --line:#26262c; --tx:#e9e9ec;
+    --dim:#8e8e98; --acc:#4a9eff; --ok:#3ecf8e; --err:#ff5f57;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+       background:var(--bg);color:var(--tx)}
+  header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;
+         align-items:baseline;gap:14px;flex-wrap:wrap}
+  h1{font-size:15px;margin:0;font-weight:600}
+  .sub{color:var(--dim);font-size:12px}
+  .badge{font-size:11px;padding:2px 8px;border-radius:99px;border:1px solid var(--line)}
+  .badge.ok{color:var(--ok);border-color:#1e5c42}
+  .badge.no{color:var(--err);border-color:#5c2320}
+  main{display:grid;grid-template-columns:290px 1fr;gap:0;min-height:calc(100vh - 52px)}
+  aside{border-right:1px solid var(--line);padding:16px;overflow-y:auto;
+        max-height:calc(100vh - 52px)}
+  section.work{padding:16px 20px;overflow-y:auto;max-height:calc(100vh - 52px)}
+  label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.04em;
+        color:var(--dim);margin:14px 0 5px}
+  select,input,button,textarea{width:100%;background:var(--panel);color:var(--tx);
+        border:1px solid var(--line);border-radius:6px;padding:7px 9px;font:inherit;font-size:13px}
+  select[size]{padding:4px}
+  button{cursor:pointer;font-weight:600;margin-top:16px;background:var(--acc);
+         border-color:var(--acc);color:#04121f}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.ghost{background:var(--panel);color:var(--tx);border-color:var(--line);
+               font-weight:400;margin-top:8px}
+  .row{display:flex;gap:8px}
+  .row>*{flex:1}
+  .hint{font-size:11px;color:var(--dim);margin-top:4px;line-height:1.4}
+  .imgs{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:6px}
+  figure{margin:0;background:#000;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  figure img{width:100%;display:block;cursor:zoom-in;background:#fff}
+  figcaption{font-size:11px;color:var(--dim);padding:6px 9px;background:var(--panel)}
+  .metrics{display:flex;gap:18px;flex-wrap:wrap;margin:14px 0 4px;padding:11px 14px;
+           background:var(--panel);border:1px solid var(--line);border-radius:8px}
+  .metric b{display:block;font-size:19px;font-weight:600}
+  .metric span{font-size:11px;color:var(--dim)}
+  pre#log{background:#000;border:1px solid var(--line);border-radius:8px;padding:11px;
+          font-size:11.5px;max-height:210px;overflow-y:auto;white-space:pre-wrap;
+          color:#b6b6be;margin-top:14px}
+  .empty{color:var(--dim);padding:50px 20px;text-align:center;font-size:13px}
+  #ovl{display:none;position:fixed;inset:0;background:rgba(0,0,0,.94);z-index:99;
+       align-items:center;justify-content:center;cursor:zoom-out}
+  #ovl.on{display:flex}
+  #ovl img{max-width:96vw;max-height:96vh;object-fit:contain}
+  .warn{background:#2a1e10;border:1px solid #6b4a1d;color:#f0c078;padding:10px 12px;
+        border-radius:6px;font-size:12px;margin-top:12px;line-height:1.5}
+  #drop{border:1.5px dashed var(--line);border-radius:8px;padding:16px 10px;
+        text-align:center;font-size:12px;color:var(--dim);cursor:pointer;line-height:1.6}
+  #drop:hover,#drop.over{border-color:var(--acc);color:var(--acc);background:#0f1b28}
+  #preview{margin-top:9px;border:1px solid var(--line);border-radius:8px;overflow:hidden;
+           background:#fff;display:none}
+  #preview img{width:100%;display:block;max-height:230px;object-fit:contain;background:#fff}
+  #preview .pcap{background:var(--panel);color:var(--dim);font-size:11px;padding:5px 8px;
+                 white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  a.dl{display:inline-block;margin-top:12px;font-size:12px;color:var(--acc);
+       text-decoration:none;border:1px solid var(--line);border-radius:6px;padding:6px 12px}
+  a.dl:hover{border-color:var(--acc)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Controllo rimozione gruccia</h1>
+  <span class="sub">Scout — elaborazione guidata, un capo alla volta</span>
+  <span id="sam3badge" class="badge">SAM 3: verifico…</span>
+</header>
+
+<main>
+<aside>
+  <div id="drop">
+    <b>Trascina qui le immagini</b><br>o clicca per sceglierle
+    <input type="file" id="fileInput" multiple accept="image/*" hidden>
+  </div>
+  <div class="hint">Restano solo in memoria: a ogni refresh si riparte da zero.</div>
+
+  <label>Immagine</label>
+  <select id="file" size="7"></select>
+  <div id="preview"></div>
+
+  <label>Detector</label>
+  <select id="detector">
+    <option value="sam3">SAM 3 (prompt testuale)</option>
+    <option value="dino_sam2">GroundingDINO + SAM2 (storico)</option>
+  </select>
+
+  <label>Prompt (separati da virgola)</label>
+  <input id="prompts" value="clothes hanger, hook, clip">
+  <div class="hint">Non aggiungere <b>tape</b>: confonde il nastro con le etichette
+    gialle del capo e le cancella. Il nastro sullo sfondo lo toglie l'opzione qui sotto,
+    che va per geometria e non può sbagliarsi sul colore.</div>
+
+  <div class="row">
+    <div>
+      <label>Confidenza</label>
+      <input id="conf" type="number" step="0.05" min="0.05" max="0.9" value="0.25">
+    </div>
+    <div>
+      <label>Dilatazione px</label>
+      <input id="dilate" type="number" min="0" max="60" value="15">
+    </div>
+  </div>
+  <div class="hint">15px = impostazione v3, la versione che danneggiava meno il capo.</div>
+
+  <label style="display:flex;align-items:center;gap:7px;text-transform:none;font-size:12.5px;color:var(--tx)">
+    <input type="checkbox" id="useAlpha" checked style="width:auto">
+    Usa alpha StyleShoots per il fill
+  </label>
+  <div class="hint">Dove l'alpha dice "sfondo", riempie di bianco senza usare LaMa.</div>
+
+  <label style="display:flex;align-items:center;gap:7px;text-transform:none;font-size:12.5px;color:var(--tx)">
+    <input type="checkbox" id="cleanFrags" checked style="width:auto">
+    Togli nastro adesivo e frammenti isolati
+  </label>
+  <div class="hint">Scarta ciò che è <b>staccato</b> dal capo e sotto l'1% della sua area.
+    L'etichetta è attaccata al capo, quindi non viene mai toccata.</div>
+
+  <label style="display:flex;align-items:center;gap:7px;text-transform:none;font-size:12.5px;color:var(--tx)">
+    <input type="checkbox" id="catchShadows" checked style="width:auto">
+    Togli anche le ombre della gruccia
+  </label>
+  <div class="hint">Le clip proiettano un'ombra sul tessuto: SAM 3 segmenta la clip
+    ma non la sua ombra, che resta come alone scuro. Questa opzione la include.</div>
+  <div class="row" style="margin-top:6px">
+    <div>
+      <label>Soglia ombra</label>
+      <input id="shadowStrength" type="number" step="0.02" min="0.5" max="0.98" value="0.82">
+    </div>
+  </div>
+  <div class="hint">Più basso = prende solo le ombre molto marcate. Alza se restano
+    aloni, abbassa se mangia il pattern scuro del tessuto.</div>
+
+  <label>Ricostruzione del tessuto</label>
+  <select id="engine">
+    <optgroup label="Rimozione (erase)">
+      <option value="lama">LaMa — estende la texture</option>
+      <option value="iop_mat">MAT — buchi grandi</option>
+      <option value="iop_migan">MIGAN — leggero e veloce</option>
+      <option value="iop_fcf">FcF — Fourier CNN</option>
+      <option value="iop_zits">ZITS (IOPaint) — struttura + texture</option>
+      <option value="iop_ldm">LDM — latent diffusion</option>
+      <option value="iop_lama">LaMa (IOPaint) — con tiling</option>
+    </optgroup>
+    <optgroup label="Altro">
+      <option value="zits">ZITS (nostro) — crop quadrato</option>
+      <option value="patch">Texture patching — clona dal capo</option>
+      <option value="sd15">SD 1.5 — generativo (sostituire)</option>
+      <option value="none">Nessuna — lascia il buco bianco</option>
+    </optgroup>
+  </select>
+  <div class="hint" id="engHint"></div>
+  <div id="sdPromptBox" style="display:none">
+    <label>Prompt per il generativo (opzionale)</label>
+    <input id="sdPrompt" placeholder="es. brown fabric with coffee pot pattern">
+  </div>
+
+  <button id="run">Elabora</button>
+  <button class="ghost" id="swap">Confronta con l'altro detector</button>
+</aside>
+
+<section class="work">
+  <div id="metrics"></div>
+  <div id="out" class="empty">Scegli un capo e premi <b>Elabora</b>.</div>
+  <pre id="log" style="display:none"></pre>
+</section>
+</main>
+
+<div id="ovl"><img id="ovlimg"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let polling = null;
+// anteprime tenute nel browser: nome file -> object URL locale
+const thumbs = new Map();
+
+async function init(){
+  // ogni caricamento della pagina azzera le immagini lato server
+  await fetch('/api/reset',{method:'POST'});
+  const r = await (await fetch('/api/images')).json();
+  const b = $('sam3badge');
+  if(r.sam3_ready){ b.textContent = `SAM 3 pronto (${r.sam3_size_mb} MB)`; b.className='badge ok'; }
+  else { b.textContent = 'SAM 3 non disponibile'; b.className='badge no';
+         $('detector').value='dino_sam2'; }
+  fillFiles([]);
+}
+function fillFiles(names){
+  const sel = $('file'); const prev = sel.value; sel.innerHTML='';
+  names.forEach(f=>{
+    const o=document.createElement('option'); o.value=f; o.textContent=f; sel.appendChild(o);
+  });
+  if(names.includes(prev)) sel.value = prev;
+  else if(sel.options.length) sel.selectedIndex = 0;
+  showPreview();
+}
+function showPreview(){
+  const name = $('file').value, box = $('preview');
+  const url = thumbs.get(name);
+  if(!url){ box.style.display='none'; box.innerHTML=''; return; }
+  box.style.display='block';
+  box.innerHTML = `<img src="${url}"><div class="pcap">${name}</div>`;
+  box.querySelector('img').onclick = ()=>{ $('ovlimg').src=url; $('ovl').classList.add('on'); };
+}
+$('file').onchange = showPreview;
+
+const ENG_HINTS = {
+  lama: "Per RIMUOVERE. Estende la texture circostante: ottimo su tinta unita, sbaglia sui pattern figurativi.",
+  iop_mat: "Mask-Aware Transformer, pensato per buchi grandi. Migliore di LaMa sulla semantica complessa, meno sulle texture periodiche.",
+  iop_migan: "Leggero e veloce, pensato per la rimozione efficiente. Da provare: nessuna delle analisi lo aveva considerato.",
+  iop_fcf: "Fourier CNN. Stessa famiglia di LaMa ma addestramento diverso — buono sulle strutture.",
+  iop_zits: "ZITS nella versione mantenuta da IOPaint, con tiling automatico per l'alta risoluzione.",
+  iop_ldm: "Latent Diffusion. Più lento, addestrato però a cancellare e non a generare.",
+  iop_lama: "Lo stesso LaMa, ma con il tiling di IOPaint (crop attorno alla maschera). Utile come termine di paragone.",
+  zits: "Ricostruisce prima le LINEE strutturali (wireframe), poi la texture. Migliore di LaMa dove un bordo o una costina deve continuare dietro la gruccia — es. il colletto di una maglia. Elabora un crop quadrato attorno alla maschera.",
+  patch: "Copia il pattern VERO da un'altra zona dello stesso capo e lo fonde con Poisson blending. Non inventa nulla: pensato per i tessuti a fantasia dove LaMa spalma e i generativi allucinano.",
+  sd15: "Per SOSTITUIRE: scrivi nel prompt cosa mettere al posto dell'oggetto (es. \"bee\") e funziona bene su aree piccole. Come rimozione invece è peggiore di LaMa — lascia il fantasma dell'oggetto e perde dettaglio (lavora a 512px).",
+  none: "L'area resta bianca. Il buco è netto: lo chiudi in Photoshop clonando il pattern vero dello stesso capo."
+};
+function engChanged(){
+  const e = $('engine').value;
+  $('engHint').innerHTML = ENG_HINTS[e];
+  $('sdPromptBox').style.display = e==='sd15' ? 'block' : 'none';
+}
+$('engine').onchange = engChanged;
+engChanged();
+
+$('run').onclick = async ()=>{
+  if(!$('file').value){ alert('Trascina prima un\'immagine'); return; }
+  $('run').disabled = true;
+  $('log').style.display='block'; $('log').textContent='';
+  $('out').innerHTML = '<div class="empty">Elaborazione in corso…</div>';
+  $('metrics').innerHTML='';
+  const body = {
+    filename:$('file').value,
+    detector:$('detector').value, prompts:$('prompts').value,
+    conf:parseFloat($('conf').value), dilate_px:parseInt($('dilate').value),
+    use_alpha:$('useAlpha').checked, clean_frags:$('cleanFrags').checked,
+    engine:$('engine').value, sd_prompt:$('sdPrompt').value,
+    catch_shadows:$('catchShadows').checked,
+    shadow_strength:parseFloat($('shadowStrength').value)
+  };
+  const res = await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},
+                                      body:JSON.stringify(body)});
+  if(!res.ok){ const e=await res.json(); alert(e.error||'Errore'); $('run').disabled=false; return; }
+  polling = setInterval(poll, 700);
+};
+
+$('swap').onclick = ()=>{
+  $('detector').value = $('detector').value==='sam3' ? 'dino_sam2' : 'sam3';
+  $('run').click();
+};
+
+async function poll(){
+  const s = await (await fetch('/api/status')).json();
+  $('log').textContent = s.log.join('\n');
+  $('log').scrollTop = $('log').scrollHeight;
+  if(s.running) return;
+  clearInterval(polling); $('run').disabled=false;
+  if(s.error){
+    $('out').innerHTML = `<div class="warn"><b>Errore.</b> ${s.error}</div>`;
+    return;
+  }
+  if(!s.result) return;
+  const r = s.result;
+  $('metrics').innerHTML = `<div class="metrics">
+      <div class="metric"><b>${r.mask_px.toLocaleString('it')}</b><span>px maschera gruccia</span></div>
+      <div class="metric"><b style="color:${r.collateral_px>40000?'var(--err)':'var(--ok)'}">${r.collateral_px.toLocaleString('it')}</b><span>px del capo alterati — più basso è meglio</span></div>
+    </div>`;
+  $('out').innerHTML = `<div class="imgs">
+      <figure><img src="${r.before}"><figcaption>Originale</figcaption></figure>
+      <figure><img src="${r.after}"><figcaption>Risultato</figcaption></figure>
+      <figure><img src="${r.overlay}"><figcaption>Maschera rilevata (rosso)</figcaption></figure>
+    </div>
+    <a class="dl" href="${r.download}" download="${r.download_name}">Scarica il risultato a piena risoluzione</a>`;
+  document.querySelectorAll('.imgs img').forEach(i=>{
+    i.onclick=()=>{ $('ovlimg').src=i.src; $('ovl').classList.add('on'); };
+  });
+}
+// --- caricamento immagini (drag&drop o click) ---
+const drop = $('drop');
+drop.onclick = ()=> $('fileInput').click();
+$('fileInput').onchange = e => upload(e.target.files);
+['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{
+  e.preventDefault(); drop.classList.add('over');}));
+['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{
+  e.preventDefault(); drop.classList.remove('over');}));
+drop.addEventListener('drop', e => upload(e.dataTransfer.files));
+// evita che il browser apra l'immagine se sbagli mira
+['dragover','drop'].forEach(ev=>document.addEventListener(ev,e=>e.preventDefault()));
+
+async function upload(list){
+  if(!list || !list.length) return;
+  const fd = new FormData();
+  // l'anteprima è disponibile subito: il file ce l'ha già il browser
+  [...list].forEach(f=>{
+    fd.append('files', f);
+    if(thumbs.has(f.name)) URL.revokeObjectURL(thumbs.get(f.name));
+    thumbs.set(f.name, URL.createObjectURL(f));
+  });
+  drop.innerHTML = 'Carico…';
+  const r = await (await fetch('/api/upload',{method:'POST',body:fd})).json();
+  drop.innerHTML = '<b>Trascina qui le immagini</b><br>o clicca per sceglierle';
+  const all = await (await fetch('/api/images')).json();
+  if(r.saved && r.saved.length) $('file').value = r.saved[0];
+  fillFiles(all.images);
+  if(r.saved && r.saved.length){ $('file').value = r.saved[0]; showPreview(); }
+}
+
+$('ovl').onclick=()=>{ $('ovl').classList.remove('on'); $('ovlimg').src=''; };
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') $('ovl').classList.remove('on'); });
+init();
+</script>
+</body>
+</html>

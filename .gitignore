@@ -1,0 +1,27 @@
+# Ambiente e pesi: si ricostruiscono sull'istanza con setup_remote.sh
+venv/
+venv-*/
+modelli/
+output/
+__pycache__/
+*.pyc
+
+# ZITS clonato: lo riscarica lo script di setup
+modelli/zits_repo/
+
+# Credenziali — MAI committare
+.env
+*.pem
+*.key
+
+# Immagini di lavoro (pesano GB, si sincronizzano con rsync)
+*.png
+*.jpg
+*.jpeg
+*.webp
+capi_test/
+!gui/**/*.png
+
+# Log
+*.log
+batch_log.txt

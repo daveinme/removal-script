@@ -1,0 +1,306 @@
+================================================================================
+SCOUT — RIMOZIONE GRUCCIA: ANALISI STATO E ALTERNATIVE
+Redatto: 2026-08-05
+================================================================================
+
+--------------------------------------------------------------------------------
+1. LA COSA PIÙ IMPORTANTE: LE ITERAZIONI HANNO PEGGIORATO IL RISULTATO
+--------------------------------------------------------------------------------
+
+Osservazione dell'utente confermata con misure sul jeans (JNS10416-M-UC),
+zona vita, confronto v3 / v7 / v15:
+
+    versione        px capo alterati    residuo gruccia sopra
+    v3  dilate15        241.018                 100
+    v7  split           237.209               1.030
+    v15 bgdilate45      258.848                   9
+
+v15 tocca ~18.000 px in PIÙ sul capo rispetto a v3, per guadagnare 91 px di
+residuo. Visivamente v3 ha il bordo vita continuo e pulito; v15 ha il "morso"
+bianco che mangia il bordo (è il difetto segnalato dall'utente).
+
+CAUSA: si è ottimizzata la metrica sbagliata. Si inseguiva il residuo della
+gruccia pagando in danno al capo — ma è il danno al capo quello che si nota.
+La dilatazione BG a 45px, ritenuta "sicura", mangia il bordo ogni volta che la
+classificazione BG/FG sbaglia.
+
+=> PUNTO DI RIPARTENZA CORRETTO: v3, non v15.
+   Le 12 iterazioni successive sono da considerare un vicolo cieco.
+
+--------------------------------------------------------------------------------
+2. DOVE SI ROMPE DAVVERO (misurato, non stimato)
+--------------------------------------------------------------------------------
+
+Scomposizione del residuo in due cause separate:
+
+    capo          px persi dalla maschera SAM2   px mascherati ma fill fallito
+    GNN10258              38.480                          0
+    VST10509             104.432                     39.631
+    TSH11514              16.270                     12.188
+
+Su GNN il fill è PERFETTO (zero px falliti) e restano comunque 38k px di
+gruccia: non erano mai stati mascherati.
+
+=> Il collo di bottiglia dominante è la SEGMENTAZIONE (SAM2), non l'inpainting.
+   Ecco perché v11-v15, che lavoravano tutte sul fill e sulla dilatazione, non
+   hanno chiuso il problema: curavano il sintomo sbagliato.
+
+--------------------------------------------------------------------------------
+3. IPOTESI TESTATE E SCARTATE IN QUESTA SESSIONE
+--------------------------------------------------------------------------------
+
+[SCARTATA] RMBG-2.0 per togliere il pezzo di gruccia residuo
+  Testato davvero su 4 capi (modello già in cache, girato su GPU).
+  RESULT: la gruccia resta INTERA — gancio, barra, clip, logo "STARTER"
+  leggibile. RMBG-2.0 separa soggetto/sfondo, e una gruccia appoggiata al capo
+  per lui è soggetto. Non risolve.
+  File: scratchpad/rmbg/top_JNS10416-M-UC.png
+
+[SCARTATA] Taglio geometrico sopra la linea spalle
+  Idea: sopra le spalle, ogni px non-bianco è gruccia per definizione.
+  Sembrava dare "residuo=0" su tutti e 8 i capi, ma era una MISURA CIRCOLARE
+  (misurava il residuo solo sopra la linea che aveva appena azzerato).
+  Al confronto visivo: sul jeans lascia barra e clip intatte, sulla t-shirt
+  mangia la cima del collo. La barra della gruccia è larga quanto le spalle,
+  quindi la linea di taglio cade sotto di essa.
+  File: scratchpad/confronti/*.png (colonna 3)
+
+--------------------------------------------------------------------------------
+4. I DUE DIFETTI RESIDUI SONO DIVERSI E VANNO SEPARATI
+--------------------------------------------------------------------------------
+
+A) GRUCCIA SOPRA/ACCANTO AL CAPO (gancio, barra)
+   Problema di segmentazione. Risolvibile: vedi §5.
+
+B) "MORSO" DOVE LA CLIP STRINGEVA IL CAPO (bordo vita jeans, collo felpa)
+   Il tessuto era FISICAMENTE OCCLUSO dalla clip. Non ci sono pixel da
+   recuperare: quel bordo va RICOSTRUITO. Su un profilo netto e regolare
+   (vita di jeans, collo a costine) l'inpainting automatico sbaglia in modo
+   visibile — è quello che si vede nelle immagini segnalate dall'utente.
+   Questo è il caso che realisticamente resta manuale.
+
+--------------------------------------------------------------------------------
+5. STRADA TECNICA CONSIGLIATA: SAM 3
+--------------------------------------------------------------------------------
+
+Stiamo usando SAM 2.1 (uscito 2024) + GroundingDINO. Esiste di meglio, ORA:
+
+SAM 3 — Meta, rilasciato novembre 2025; SAM 3.1 (drop-in replacement) marzo 2026.
+  - Prompt TESTUALE nativo: elimina del tutto GroundingDINO dalla pipeline
+    (oggi è il pezzo che genera le box, con phrase parsing sporco tipo
+    '##er clip').
+  - Dichiarato esplicitamente migliore su "thin, small, low contrast, and
+    occluded objects" — cioè ESATTAMENTE il nostro fallimento misurato
+    (profilo sottile del gancio dove si piega).
+  - Licenza SAM: uso commerciale consentito.
+  - Peso: sam3.pt 3.45 GB — gira sulla RTX 3060 12GB.
+  - Accesso: https://huggingface.co/facebook/sam3 (gated, va richiesto
+    l'accesso). Mirror community: 1038lab/sam3
+  - Uso via ultralytics:
+        pip install -U ultralytics
+        from ultralytics.models.sam import SAM3SemanticPredictor
+        predictor.set_image(img); results = predictor(text=["clothes hanger"])
+
+  COSTO DEL TEST: mezza giornata. Da provare su VST10509 e GNN10258 (i due
+  casi con più px persi) ripartendo dalla configurazione v3.
+
+NOTA su LaMa: NON è il pezzo da cambiare. I modelli diffusion (FLUX, SDXL
+inpaint) allucinano e lasciano artefatti più di LaMa su rimozione oggetti, e
+reinventano texture — lo stesso motivo per cui il primo tool (fal.ai/seedream)
+fu abbandonato. LaMa resta la scelta giusta per il fill.
+
+--------------------------------------------------------------------------------
+6. ALTERNATIVE ALL'INTERO PROCESSO
+--------------------------------------------------------------------------------
+
+>>> ALT-1 — CAMBIARE LO SCATTO, NON LA POST-PRODUZIONE  [più efficace in assoluto]
+
+    Il problema nasce in sala posa. Tecniche standard del settore:
+      - GRUCCIA INVISIBILE / ACRILICO TRASPARENTE: la gruccia sta DENTRO il
+        capo, non sopra. Sparisce il 90% del lavoro.
+      - FILO DA PESCA / NYLON: il capo è sospeso da un filo sottile. In post
+        si rimuove una linea di 2px su sfondo bianco — banale e automatizzabile
+        al 100%, altro che segmentare un gancio metallico.
+      - CLIP DIETRO IL CAPO, MAI SUL BORDO VISIBILE: elimina in origine il
+        difetto (B) del "morso", che è quello NON risolvibile in automatico.
+
+    COSTO: qualche decina di euro di attrezzatura + cambio di abitudine allo
+    shooting. Contro settimane di sviluppo.
+    ONESTAMENTE: se si può intervenire sul modo di fotografare, questa è di
+    gran lunga la strada migliore. Rende il resto quasi inutile.
+    Non risolve però l'archivio storico già fotografato.
+
+>>> ALT-2 — SERVIZIO COMMERCIALE VIA API (Photoroom "Ghost Mannequin")
+
+    Il problema ha un nome industriale: "ghost mannequin" / "invisible
+    mannequin". Non è un problema nuovo, è un prodotto già venduto.
+      - Photoroom API: $0.10 per chiamata, funzione Ghost Mannequin inclusa nel
+        piano Plus (non nel Basic). Batch fino a 250 immagini.
+      - Rimozione sfondo semplice: $0.02/immagine.
+      - Altri: PhotoRobot, WizStudio, img2img, Wearview.
+
+    CONTI: 500 capi = ~50 $ (~46 €). 2.000 capi = ~200 $.
+    Da confrontare col costo reale delle ore Photoshop + delle ore di sviluppo
+    già spese.
+    DA VERIFICARE PRIMA: che non degradi la risoluzione (è l'errore che ha
+    ucciso il primo tentativo fal.ai: 3697x4723 -> 1728x2208) e che non
+    reinventi la texture. Test consigliato: 3-4 capi veri, controllo a
+    risoluzione piena.
+
+>>> ALT-3 — IBRIDO REALISTICO (automatico + manuale mirato)
+
+    Pipeline automatica per la gruccia (difetto A) + ritocco manuale solo sui
+    morsi delle clip (difetto B). Sono pochi punti per capo, ben localizzati:
+    in Photoshop si chiudono in ~1 minuto con timbro clone su un bordo
+    regolare — cosa che nessun modello provato fa in modo affidabile.
+    Non è una resa: è riconoscere che il 90% automatizzabile vale comunque,
+    e che l'ultimo 10% costa più di quanto rende.
+
+>>> ALT-4 — PHOTOSHOP CON AUTOMAZIONE PARZIALE
+
+    Se si resta su Photoshop: Azioni + Batch, o script .jsx, per le parti
+    ripetitive (crop, canvas, export), tenendo manuale solo la rimozione.
+    Riduce la fatica senza inseguire l'automazione totale.
+
+--------------------------------------------------------------------------------
+6-bis. AGGIORNAMENTO 2026-08-05 (sessione 3) — SAM 3 E I CASI RESIDUI
+--------------------------------------------------------------------------------
+
+RISOLTO: la detection. SAM 3 (prompt testuale) ha sostituito GroundingDINO +
+SAM2. Confidenza 0.94 contro 0.25-0.30, trova i ganci sottili, e su capi in
+tinta unita il risultato e' pulito (0 px del capo alterati). Funziona
+nell'80-90% dei casi.
+
+TRE CASI DI FALLIMENTO RESIDUI, tutti verificati su capi reali:
+  A) Tessuti a fantasia figurativa (caffettiere, fiorellini): sotto le clip
+     il tessuto e' fisicamente occluso. LaMa spalma il colore senza trama,
+     il pattern non riprende. Misurato: 92.535 px alterati, tutti nel capo.
+  B) Gruccia dietro un dettaglio strutturale (colletto maglia MGL10708):
+     LaMa riempie con lo sfondo bianco invece che col tessuto che continua
+     dietro. Lascia un alone sfrangiato sopra il colletto. Provate dilate 15
+     e dilate 5: con 15 l'alone e' esteso, con 5 resta un residuo di legno.
+     Non esiste un valore intermedio buono — e' il metodo a non funzionare.
+  C) Bordi mangiati dove la maschera incontra il profilo del capo.
+
+CAUSA TECNICA COMUNE (diagnosi confermata): LaMa usa Fast Fourier
+Convolutions, ottime per ripetere texture a lungo raggio ma prive di
+ragionamento geometrico. Non "capisce" che un colletto continua dietro un
+occlusore, ne' che un pattern figurativo ha una struttura da rispettare.
+
+MOTORI DI FILL TESTATI IN QUESTA SESSIONE:
+  - LaMa: resta il migliore per RIMUOVERE. Non va sostituito.
+  - SD 1.5 inpainting: PESSIMO per rimuovere. Lavora a 512px (perde
+    dettaglio su crop grandi) ed essendo generativo INVENTA invece di
+    cancellare — in un test ha sostituito una gruccia nera con una gruccia
+    ZEBRATA, in un altro ha lasciato un fantasma grigio dell'oggetto.
+    OTTIMO invece per SOSTITUIRE: prompt "bee" su un logo rimosso ha
+    prodotto un'ape integrata con ombra corretta. Due usi diversi.
+  - Texture patching (implementato in gui/app.py): clona il pattern VERO da
+    un'altra zona dello stesso capo e lo fonde con cv2.seamlessClone
+    (Poisson). Nessuna invenzione, nessuna licenza, millisecondi. E' la
+    strada piu' promettente per il caso A. DA VALUTARE sui capi reali.
+
+LICENZE VERIFICATE DIRETTAMENTE SUI REPOSITORY (2026-08-05) — attenzione,
+le tabelle di sintesi in analisi2.txt contengono un errore:
+  - ZITS / ZITS++      Apache 2.0        OK commerciale (le restrizioni
+                       riguardano solo i DATASET di test, non i pesi)
+  - EdgeConnect        CC BY-NC 4.0      NO commerciale (analisi2.txt dice
+                       erroneamente MIT — verificato: e' non-commercial)
+  - MAT                "research only"   NO commerciale (dichiarato nel repo)
+  - PowerPaint v2      Apache 2.0        OK commerciale
+  - LaMa               Apache 2.0        OK commerciale
+  - SAM 3              licenza SAM       OK commerciale
+  - FLUX.2 Klein 4B    Apache 2.0        OK commerciale, ma ~13GB VRAM
+                       (ne abbiamo 11.6) e richiede transformers 5.x che
+                       romperebbe GroundingDINO (bloccato a 4.49.0)
+
+ESITO TEST ZITS (2026-08-05, 4 capi STYLESHOOT, confronto diretto con LaMa):
+  NON e' migliore di LaMa, e su un capo e' peggio.
+  - JNS10431 (jeans): LaMa pulisce tutto; ZITS lascia un FANTASMA A
+    TRATTEGGIO della gruccia, come uno schizzo a matita. E' il suo difetto
+    strutturale: ricostruisce le linee dell'oggetto e le ricolora invece di
+    cancellarlo. Il suo punto di forza ("capisce le strutture") diventa il
+    problema, perche' la struttura che capisce e' la gruccia.
+  - MGL10708 (maglia, colletto): pari. Entrambi lasciano una macchia sopra
+    il colletto — ZITS piu' compatta e grigia, LaMa piu' chiara e diffusa.
+    Caso ancora IRRISOLTO.
+  Nota: ZITS va in OOM su crop > ~2000px (alloca 4 GB). Aggiunto limite con
+  elaborazione a scala ridotta, che pero' fa perdere dettaglio.
+
+IOPAINT (segnalato dall'utente — iopaint.com/models/erase): integra e
+mantiene LaMa, MAT, MIGAN, LDM, ZITS, FcF, Manga + i diffusion (PowerPaint,
+BrushNet, PaintByExample). Installato (v1.6.0) e collegato alla GUI: evita
+le patch a mano che ZITS aveva richiesto (np.float, compare_ssim) e gestisce
+da solo il tiling per l'alta risoluzione.
+  - MAT, MIGAN, FcF: scaricati e testati come import, OK.
+  - **MIGAN: FALLITO** (BRM10482, capo a caffettiere). Stesso difetto di
+    ZITS: lascia un FANTASMA A TRATTEGGIO di gancio, barra e clip, piu' due
+    frammenti colorati (blu/marrone) sul bordo vita che nell'originale non
+    esistono. Il pattern del tessuto sotto resta invece intatto.
+  - **FcF: FALLITO** (BRM10482, stesso capo). Identico difetto di MIGAN e
+    ZITS: fantasma a tratteggio della gruccia + frammenti blu sul bordo
+    vita. Notevole perche' FcF e' della stessa famiglia Fourier di LaMa,
+    eppure si comporta come i modelli strutturali. Quindi non e' una
+    questione di architettura ma di ADDESTRAMENTO: LaMa e' l'unico
+    addestrato in modo da cancellare davvero.
+  - **MAT va in OOM durante l'uso reale (2026-08-05) — DA RISOLVERE.**
+    Probabile causa: MAT alloca molto sui crop grandi e SAM 3 (~9 GB) resta
+    in VRAM. Gia' aggiunto lo scarico del modello precedente al cambio
+    motore; se non basta servira' ridurre hd_strategy_crop_trigger_size
+    o forzare il CPU offload.
+  - PaintByExample: idea dell'utente — passargli come esempio un RITAGLIO
+    del capo stesso, cosi' il pattern e' quello vero invece che inventato.
+    LASCIATA IN SOSPESO. Riserva: e' addestrato a INSERIRE oggetti, non a
+    cancellare, e lavora a 512px.
+
+PATTERN EMERSO DAI TEST (importante, orienta le scelte future):
+  I modelli che "capiscono la struttura" RICOSTRUISCONO LA GRUCCIA invece di
+  cancellarla. Verificato su ZITS (jeans JNS10431) e MIGAN (BRM10482):
+  entrambi lasciano un fantasma a tratteggio dell'oggetto. La loro forza —
+  ragionare sulle linee — diventa il difetto, perche' la struttura piu'
+  evidente nella maschera E' la gruccia stessa.
+  LaMa funziona proprio perche' NON ragiona sulla struttura: estende lo
+  sfondo bianco, che sopra il capo e' la cosa giusta da fare.
+  => Cercare "un modello che capisca la struttura" e' probabilmente la
+     direzione SBAGLIATA per la rimozione. Semmai serve per il caso B
+     (colletto), dove pero' va guidato a NON ridisegnare l'occlusore.
+
+PROSSIMI TEST, in ordine:
+  1. Texture patching sui capi a fantasia (gia' in GUI, da valutare).
+  2. ZITS per il caso A: unico modello che separa ricostruzione della
+     STRUTTURA (wireframe via LSM-HAWP) dalla texture. ~6-8GB VRAM.
+     Nota: richiede il preprocessing LSM-HAWP, non e' drop-in.
+  3. PowerPaint v2 per il caso B (semantica della struttura), ~10-12GB con
+     enable_model_cpu_offload().
+  4. Human-in-the-loop nella GUI: l'operatore corregge maschera e sorgente
+     del patch dal browser. Stessa infrastruttura che servira' al warping.
+
+--------------------------------------------------------------------------------
+7. RACCOMANDAZIONE
+--------------------------------------------------------------------------------
+
+1. TORNARE A v3 come base. Buttare la dilatazione BG 45px (v13-v15).
+2. Se si può incidere sullo SHOOTING -> fare ALT-1. È la vittoria vera e rende
+   superfluo quasi tutto il resto. Da valutare per primo.
+3. Per l'archivio storico già fotografato:
+   a. testare Photoroom API su 3-4 capi (mezz'ora, ~1 €) e verificare
+      risoluzione + texture. Se regge, il problema è chiuso a costo noto.
+   b. in parallelo, testare SAM 3 su VST10509/GNN10258 partendo da v3.
+4. In ogni caso mettere in conto che il "morso" delle clip (difetto B) resta
+   lavoro manuale, salvo che ALT-1 lo elimini alla fonte.
+
+Da evitare: altre iterazioni di tuning su dilatazione/soglie di fill. Quella
+strada ha già prodotto 12 versioni e un peggioramento netto.
+
+================================================================================
+FONTI
+  SAM 3 / 3.1        https://ai.meta.com/blog/segment-anything-model-3/
+                     https://huggingface.co/facebook/sam3
+                     https://docs.ultralytics.com/models/sam-3
+  Photoroom API      https://www.photoroom.com/api/pricing
+                     https://docs.photoroom.com/image-editing-api-plus-plan/pricing
+  Ghost mannequin    https://www.photorobot.com/blog/ghost-mannequin-effect
+  Tecniche di posa   https://pixeleyesphotography.co.uk/hung-flats-floating-garments-studio-techniques/
+                     https://www.photorobot.com/tutorials/fashion-photography-styling-tools
+  Inpainting         https://github.com/advimman/lama
+================================================================================
