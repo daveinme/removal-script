@@ -45,6 +45,14 @@ app = FastAPI(title="Controllo rimozione gruccia")
 JOB = {"running": False, "log": [], "result": None, "error": None}
 _lock = threading.Lock()
 
+# Sessione di lavoro iterativo su un capo: si parte dall'immagine originale e
+# a ogni passata si accumula il risultato, cosi' la successiva lavora su un
+# residuo piu' piccolo (e quindi piu' facile da riempire).
+# Ogni passata viene registrata: il registro dice DOVE la parte automatica
+# sbaglia sistematicamente, ed e' quello che serve per migliorarla.
+SESSION = {"filename": None, "current": None, "passes": []}
+SESSION_LOG = ROOT / "output" / "sessioni.jsonl"
+
 
 def log(msg: str):
     with _lock:
@@ -700,6 +708,12 @@ class RunReq(BaseModel):
     dilate_px: int = 15             # default v3
     use_alpha: bool = True
     clean_frags: bool = True        # togli nastro adesivo / frammenti isolati
+    # Lavoro iterativo: se continue_session, si parte dal risultato della
+    # passata precedente invece che dall'originale. `zona` limita la ricerca
+    # a un rettangolo [x0,y0,x1,y1] in coordinate relative 0-1.
+    continue_session: bool = False
+    zona: list[float] | None = None
+    nota: str = ""                  # annotazione libera dell'operatore
     catch_shadows: bool = True      # estendi la maschera alle ombre della gruccia
     shadow_strength: float = 0.82   # piu' basso = solo ombre molto marcate
     engine: str = "lama"            # "lama" | "sd15" (generativo) | "none" (buco bianco)
@@ -714,8 +728,19 @@ def run_job(req: RunReq):
             raise FileNotFoundError(
                 f"'{req.filename}' non è più in memoria — ricaricala trascinandola."
             )
-        log(f"Carico {req.filename}")
         rgb, alpha = load_rgb(raw)
+        # Passata successiva sullo stesso capo: si riparte dal risultato
+        # accumulato, non dall'originale. Il residuo e' piu' piccolo e
+        # circondato da piu' contesto pulito, quindi il fill ha vita facile.
+        n_pass = 1
+        if (req.continue_session and SESSION["current"] is not None
+                and SESSION["filename"] == req.filename):
+            rgb = SESSION["current"].copy()
+            n_pass = len(SESSION["passes"]) + 1
+            log(f"Passata {n_pass} su {req.filename} (riparte dal risultato precedente)")
+        else:
+            SESSION.update({"filename": req.filename, "current": None, "passes": []})
+            log(f"Carico {req.filename} — passata 1")
         log(f"  risoluzione {rgb.shape[1]}x{rgb.shape[0]}, alpha: {'si' if alpha is not None else 'no'}")
 
         prompts = [p.strip() for p in req.prompts.split(",") if p.strip()]
@@ -729,6 +754,22 @@ def run_job(req: RunReq):
         if mask is None:
             raise RuntimeError("Nessuna maschera trovata — prova ad abbassare conf o cambiare prompt.")
         log(f"  maschera: {int((mask>0).sum())} px  ({time.time()-t0:.1f}s)  {info}")
+
+        # Zona ristretta: l'operatore ha selezionato un rettangolo attorno al
+        # residuo, quindi si ignora tutto cio' che SAM 3 trova fuori da li'.
+        if req.zona:
+            zx0, zy0, zx1, zy1 = req.zona
+            H, W = mask.shape
+            box = np.zeros_like(mask)
+            box[int(zy0 * H):int(zy1 * H), int(zx0 * W):int(zx1 * W)] = 255
+            before = int((mask > 0).sum())
+            mask = cv2.bitwise_and(mask, box)
+            log(f"  zona selezionata: maschera ristretta da {before} a "
+                f"{int((mask > 0).sum())} px")
+            if (mask > 0).sum() == 0:
+                raise RuntimeError(
+                    "Nessuna gruccia trovata dentro la zona selezionata — "
+                    "prova ad allargarla o ad abbassare la confidenza.")
 
         if req.catch_shadows:
             mask, nsh = add_shadows(rgb, mask, strength=req.shadow_strength)
@@ -796,8 +837,25 @@ def run_job(req: RunReq):
                 "collateral_px": collateral,
                 "download": full_png,
                 "download_name": f"{stem}_pulita.png",
+                "pass_n": n_pass,
             }
         log(f"px capo alterati fuori maschera: {collateral}  (piu' basso = meglio)")
+
+        # Il risultato diventa la base della prossima passata, e la passata
+        # viene registrata: e' il dato che dice dove l'automatico sbaglia.
+        SESSION["current"] = out
+        rec = {
+            "capo": req.filename, "passata": n_pass,
+            "detector": req.detector, "engine": req.engine,
+            "prompt": prompts, "conf": req.conf, "dilate_px": req.dilate_px,
+            "zona": req.zona, "nota": req.nota,
+            "catch_shadows": req.catch_shadows,
+            "mask_px": int((md > 0).sum()), "collateral_px": collateral,
+            "secondi": round(time.time() - t0, 1),
+        }
+        SESSION["passes"].append(rec)
+        save_pass(rec)
+        log(f"Passata {n_pass} registrata in output/sessioni.jsonl")
     except Exception as e:
         import traceback
         log(f"ERRORE: {type(e).__name__}: {e}")
@@ -831,6 +889,34 @@ async def api_upload(files: list[UploadFile] = File(...)):
         UPLOADS[name] = await f.read()
         saved.append(name)
     return {"saved": saved}
+
+
+def save_pass(entry: dict):
+    """Registra una passata su file, in append. Una riga JSON per passata:
+    serve a capire dove la parte automatica sbaglia sistematicamente
+    (quante passate servono, in che zona, con quali parametri)."""
+    import datetime
+    entry["quando"] = datetime.datetime.now().isoformat(timespec="seconds")
+    SESSION_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with SESSION_LOG.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+@app.get("/api/session")
+async def api_session():
+    """Stato della sessione iterativa in corso."""
+    return {
+        "filename": SESSION["filename"],
+        "passes": SESSION["passes"],
+        "has_current": SESSION["current"] is not None,
+    }
+
+
+@app.post("/api/session/reset")
+async def api_session_reset():
+    """Riparte dall'immagine originale, scartando le passate fatte."""
+    SESSION.update({"filename": None, "current": None, "passes": []})
+    return {"ok": True}
 
 
 @app.post("/api/reset")

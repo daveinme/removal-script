@@ -62,6 +62,11 @@
   #preview img{width:100%;display:block;max-height:230px;object-fit:contain;background:#fff}
   #preview .pcap{background:var(--panel);color:var(--dim);font-size:11px;padding:5px 8px;
                  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .selwrap{position:relative;display:inline-block;line-height:0}
+  .selwrap .selbox{position:absolute;border:2px dashed var(--acc);
+       background:rgba(74,158,255,.15);pointer-events:none;display:none}
+  .selhint{background:#12202f;border:1px solid #1d3a57;color:#8fc3ff;
+       padding:9px 12px;border-radius:6px;font-size:12px;margin:12px 0;line-height:1.5}
   a.dl{display:inline-block;margin-top:12px;font-size:12px;color:var(--acc);
        text-decoration:none;border:1px solid var(--line);border-radius:6px;padding:6px 12px}
   a.dl:hover{border-color:var(--acc)}
@@ -169,7 +174,14 @@
       8-10 per un test rapido, 30 per il risultato finale.</div>
   </div>
 
+  <label>Nota (facoltativa)</label>
+  <input id="nota" placeholder="es. resta l'ombra della clip a destra">
+  <div class="hint">Viene salvata nel registro delle passate, insieme ai parametri.</div>
+
   <button id="run">Elabora</button>
+  <button class="ghost" id="again" style="display:none">Altra passata sul residuo</button>
+  <button class="ghost" id="resetSess" style="display:none">Ricomincia dall'originale</button>
+  <div id="passInfo" class="hint" style="margin-top:8px"></div>
   <button class="ghost" id="swap">Confronta con l'altro detector</button>
 </aside>
 
@@ -254,8 +266,10 @@ $('run').onclick = async ()=>{
     engine:$('engine').value, sd_prompt:$('sdPrompt').value,
     sd_steps:parseInt($('sdSteps').value)||30,
     catch_shadows:$('catchShadows').checked,
-    shadow_strength:parseFloat($('shadowStrength').value)
+    shadow_strength:parseFloat($('shadowStrength').value),
+    continue_session:continueSession, zona:zona, nota:$('nota').value
   };
+  continueSession = false;   // vale solo per la chiamata appena inviata
   const res = await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},
                                       body:JSON.stringify(body)});
   if(!res.ok){ const e=await res.json(); alert(e.error||'Errore'); $('run').disabled=false; return; }
@@ -283,15 +297,29 @@ async function poll(){
       <div class="metric"><b>${r.mask_px.toLocaleString('it')}</b><span>px maschera gruccia</span></div>
       <div class="metric"><b style="color:${r.collateral_px>40000?'var(--err)':'var(--ok)'}">${r.collateral_px.toLocaleString('it')}</b><span>px del capo alterati — più basso è meglio</span></div>
     </div>`;
-  $('out').innerHTML = `<div class="imgs">
-      <figure><img src="${r.before}"><figcaption>Originale</figcaption></figure>
-      <figure><img src="${r.after}"><figcaption>Risultato</figcaption></figure>
-      <figure><img src="${r.overlay}"><figcaption>Maschera rilevata (rosso)</figcaption></figure>
+  $('out').innerHTML = `
+    <div class="selhint">Passata <b>${r.pass_n}</b> completata.
+      Se resta un <b>oggetto</b> (gancio, clip, nastro), trascina un rettangolo
+      sul risultato e premi <b>Altra passata sul residuo</b>.<br>
+      ⚠ Serve per oggetti veri, non per gli <i>artefatti</i> lasciati dal fill
+      (frange, aloni sfumati): quelli SAM 3 non li trova. Tieni la confidenza
+      <b>≥ 0,25</b> e usa prompt specifici (<code>metal hook</code>) — con
+      soglie basse rischi di cancellare parti reali del capo.</div>
+    <div class="imgs">
+      <figure><img src="${r.before}"><figcaption>Prima di questa passata</figcaption></figure>
+      <figure><div class="selwrap"><img id="selImg" src="${r.after}"><div class="selbox" id="selBox"></div></div><figcaption>Risultato — trascina per selezionare un residuo</figcaption></figure>
+      <figure><img src="${r.overlay}"><figcaption>Maschera usata (rosso)</figcaption></figure>
     </div>
     <a class="dl" href="${r.download}" download="${r.download_name}">Scarica il risultato a piena risoluzione</a>`;
   document.querySelectorAll('.imgs img').forEach(i=>{
-    i.onclick=()=>{ $('ovlimg').src=i.src; $('ovl').classList.add('on'); };
+    if(i.id!=='selImg') i.onclick=()=>{ $('ovlimg').src=i.src; $('ovl').classList.add('on'); };
   });
+  setupSelection();
+  $('again').style.display='block';
+  $('resetSess').style.display='block';
+  $('passInfo').innerHTML = zona
+    ? 'Zona selezionata: la prossima passata cercherà solo lì.'
+    : 'Nessuna zona selezionata: la prossima passata cercherà su tutta l\'immagine.';
 }
 // --- caricamento immagini (drag&drop o click) ---
 const drop = $('drop');
@@ -322,6 +350,58 @@ async function upload(list){
   fillFiles(all.images);
   if(r.saved && r.saved.length){ $('file').value = r.saved[0]; showPreview(); }
 }
+
+// --- selezione della zona sul risultato (trascinamento) ---
+let zona = null;          // [x0,y0,x1,y1] relativi 0-1
+let continueSession = false;
+
+function setupSelection(){
+  const img = $('selImg'), box = $('selBox');
+  if(!img) return;
+  let sx=0, sy=0, dragging=false;
+  img.style.cursor='crosshair';
+  img.onmousedown = e => {
+    const r = img.getBoundingClientRect();
+    sx = e.clientX-r.left; sy = e.clientY-r.top; dragging=true;
+    box.style.display='block';
+    box.style.left=sx+'px'; box.style.top=sy+'px';
+    box.style.width='0px'; box.style.height='0px';
+    e.preventDefault();
+  };
+  window.addEventListener('mousemove', e => {
+    if(!dragging) return;
+    const r = img.getBoundingClientRect();
+    const cx = Math.max(0,Math.min(e.clientX-r.left, r.width));
+    const cy = Math.max(0,Math.min(e.clientY-r.top, r.height));
+    box.style.left=Math.min(sx,cx)+'px'; box.style.top=Math.min(sy,cy)+'px';
+    box.style.width=Math.abs(cx-sx)+'px'; box.style.height=Math.abs(cy-sy)+'px';
+  });
+  window.addEventListener('mouseup', e => {
+    if(!dragging) return;
+    dragging=false;
+    const r = img.getBoundingClientRect();
+    const cx = Math.max(0,Math.min(e.clientX-r.left, r.width));
+    const cy = Math.max(0,Math.min(e.clientY-r.top, r.height));
+    const x0=Math.min(sx,cx)/r.width, x1=Math.max(sx,cx)/r.width;
+    const y0=Math.min(sy,cy)/r.height, y1=Math.max(sy,cy)/r.height;
+    if((x1-x0)<0.01 || (y1-y0)<0.01){   // click senza trascinare = annulla
+      zona=null; box.style.display='none';
+      $('passInfo').textContent='Zona annullata: la prossima passata cercherà ovunque.';
+    } else {
+      zona=[x0,y0,x1,y1];
+      $('passInfo').innerHTML='Zona selezionata ('+Math.round((x1-x0)*100)+'%×'
+        +Math.round((y1-y0)*100)+'%). Premi <b>Altra passata sul residuo</b>.';
+    }
+  });
+}
+
+$('again').onclick = ()=>{ continueSession = true; $('run').click(); };
+$('resetSess').onclick = async ()=>{
+  await fetch('/api/session/reset',{method:'POST'});
+  zona=null; continueSession=false;
+  $('again').style.display='none'; $('resetSess').style.display='none';
+  $('passInfo').textContent='Sessione azzerata: si riparte dall\'originale.';
+};
 
 $('ovl').onclick=()=>{ $('ovl').classList.remove('on'); $('ovlimg').src=''; };
 document.addEventListener('keydown',e=>{ if(e.key==='Escape') $('ovl').classList.remove('on'); });
