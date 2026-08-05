@@ -46,6 +46,7 @@ Sette motori di fill provati su capi reali. **LaMa resta il migliore.**
 | Motore | Esito | Note |
 |---|---|---|
 | **LaMa** | ✅ **migliore** | Estende lo sfondo invece di ricostruire: è ciò che serve |
+| PowerPaint | ❌ | **Ridisegna la gruccia in bianco**: stessa forma, solo ricolorata. A 30 passi è più definita che a 8. Nonostante il task `object-remove` |
 | ZITS | ❌ | Lascia un *fantasma a tratteggio* della gruccia |
 | MIGAN | ❌ | Stesso fantasma + frammenti colorati inventati |
 | FcF | ❌ | Stesso fantasma, benché sia famiglia Fourier come LaMa |
@@ -64,13 +65,17 @@ LaMa funziona proprio perché non ragiona sulla struttura.
 FcF lo dimostra: stessa architettura Fourier di LaMa, ma addestramento diverso
 → stesso fallimento di ZITS. **Non è l'architettura, è l'addestramento.**
 
+E PowerPaint lo conferma dall'altro lato: ha un task *esplicito*
+`object-remove`, eppure ridisegna la gruccia in bianco. **Nemmeno dirglielo
+basta.** Quattro modelli su quattro ricostruiscono invece di cancellare.
+
+Aumentare i passi non aiuta: a 30 passi il fantasma è più *definito* che a 8 —
+il modello ha semplicemente più iterazioni per ricostruire ciò che non
+dovrebbe esserci.
+
 ### Da testare sulla 4090 24GB
 
-1. **PowerPaint** (già nel menu, task `object-remove`) — l'unico addestrato
-   *specificamente* per la rimozione oggetti, non un prompt generico.
-   Il più promettente: è un diffusion ma guidato a cancellare, quindi non
-   dovrebbe inventare come SD 1.5
-2. **MAT** e **LDM** — mai visti lavorare davvero, solo OOM
+1. **MAT** e **LDM** — mai visti lavorare davvero, solo OOM
 3. **FLUX.2 Klein 4B** — Apache 2.0, piena risoluzione, ~13 GB.
    Richiede `transformers>=5` che rompe groundingdino: usare un **venv
    separato** (`venv-flux`), passando le maschere come PNG già generate.
