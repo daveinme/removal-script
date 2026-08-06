@@ -124,12 +124,38 @@ def build_page() -> str:
   }}
   #lightbox-overlay {{
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.92);
-    z-index: 999; align-items: center; justify-content: center; cursor: zoom-out;
+    z-index: 999; align-items: center; justify-content: center;
+    overflow: hidden; touch-action: none;
   }}
   #lightbox-overlay.open {{ display: flex; }}
-  #lightbox-overlay img {{
+  #lightbox-img {{
     max-width: 94vw; max-height: 94vh; object-fit: contain;
     box-shadow: 0 0 40px rgba(0,0,0,0.6);
+    transform-origin: 0 0; cursor: zoom-in;
+    /* niente transizione durante il trascinamento: il pan deve seguire il
+       mouse senza ritardo, altrimenti via desktop remoto sembra rotto */
+    will-change: transform;
+  }}
+  #lightbox-img.zoomed {{ cursor: grab; max-width: none; max-height: none; }}
+  #lightbox-img.dragging {{ cursor: grabbing; }}
+  #zoom-hud {{
+    position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%);
+    background: rgba(20,20,24,0.9); border: 1px solid #3a3a40; border-radius: 8px;
+    padding: 0.5rem 0.9rem; display: flex; gap: 0.75rem; align-items: center;
+    font-size: 0.8rem; color: #d8d8dc; z-index: 1000; user-select: none;
+  }}
+  #zoom-hud button {{
+    background: #2a2a30; color: #e8e8ea; border: 1px solid #43434a;
+    border-radius: 5px; padding: 0.25rem 0.6rem; cursor: pointer;
+    font-size: 0.85rem; line-height: 1.2;
+  }}
+  #zoom-hud button:hover {{ background: #35353d; }}
+  #zoom-level {{ min-width: 3.6rem; text-align: center; font-variant-numeric: tabular-nums; }}
+  #zoom-hint {{ color: #8a8a92; font-size: 0.72rem; }}
+  #lightbox-close {{
+    position: fixed; top: 1rem; right: 1.25rem; z-index: 1000;
+    background: rgba(20,20,24,0.9); color: #e8e8ea; border: 1px solid #3a3a40;
+    border-radius: 6px; padding: 0.3rem 0.7rem; cursor: pointer; font-size: 1rem;
   }}
 </style>
 </head>
@@ -138,23 +164,147 @@ def build_page() -> str:
   <div class="subtitle">Generato automaticamente da output/iterazioni/. Clicca un'immagine per ingrandirla.</div>
   {body}
 
-  <div id="lightbox-overlay"><img id="lightbox-img" src=""></div>
+  <div id="lightbox-overlay">
+    <img id="lightbox-img" src="">
+    <button id="lightbox-close" title="Chiudi (Esc)">✕</button>
+    <div id="zoom-hud">
+      <button data-zoom="out" title="Riduci (-)">−</button>
+      <span id="zoom-level">adatta</span>
+      <button data-zoom="in" title="Ingrandisci (+)">+</button>
+      <button data-zoom="100" title="Pixel reali (1)">1:1</button>
+      <button data-zoom="fit" title="Adatta a schermo (0)">adatta</button>
+      <span id="zoom-hint">rotella = zoom · trascina = sposta · doppio clic = 1:1</span>
+    </div>
+  </div>
   <script>
+    // Lightbox con zoom/pan tipo e-commerce. Serve perche' i confronti
+    // affiancati sono larghi ~2700px: adattati a schermo si perde meta' dei
+    // pixel, e via desktop remoto la differenza si nota.
     const overlay = document.getElementById('lightbox-overlay');
     const lbImg = document.getElementById('lightbox-img');
-    document.querySelectorAll('a[data-lightbox]').forEach(a => {{
-      a.addEventListener('click', e => {{
-        e.preventDefault();
-        lbImg.src = a.getAttribute('href');
-        overlay.classList.add('open');
-      }});
-    }});
-    overlay.addEventListener('click', () => {{
+    const hudLevel = document.getElementById('zoom-level');
+
+    let scale = 0;        // 0 = "adatta a schermo" (nessuna trasformazione)
+    let tx = 0, ty = 0;   // traslazione in px
+    let natW = 0, natH = 0;
+    const MIN = 0.1, MAX = 8;
+
+    function fitScale() {{
+      if (!natW) return 1;
+      return Math.min(window.innerWidth * 0.94 / natW,
+                      window.innerHeight * 0.94 / natH);
+    }}
+
+    function render() {{
+      if (scale === 0) {{
+        lbImg.classList.remove('zoomed');
+        lbImg.style.transform = '';
+        hudLevel.textContent = 'adatta';
+        return;
+      }}
+      lbImg.classList.add('zoomed');
+      lbImg.style.transform = `translate(${{tx}}px, ${{ty}}px) scale(${{scale}})`;
+      hudLevel.textContent = Math.round(scale * 100) + '%';
+    }}
+
+    // Passa da "adattata" a trasformazione esplicita mantenendo la posizione
+    // visiva: senza questo, il primo zoom fa saltare l'immagine.
+    function materialize() {{
+      if (scale !== 0) return;
+      const r = lbImg.getBoundingClientRect();
+      scale = fitScale();
+      tx = r.left; ty = r.top;
+    }}
+
+    function zoomAt(cx, cy, factor) {{
+      materialize();
+      const ns = Math.min(MAX, Math.max(MIN, scale * factor));
+      // il punto sotto il cursore resta fermo
+      tx = cx - (cx - tx) * (ns / scale);
+      ty = cy - (cy - ty) * (ns / scale);
+      scale = ns;
+      render();
+    }}
+
+    function setZoom(target) {{
+      materialize();
+      const cx = window.innerWidth / 2, cy = window.innerHeight / 2;
+      zoomAt(cx, cy, target / scale);
+    }}
+
+    function reset() {{ scale = 0; tx = ty = 0; render(); }}
+
+    function open(href) {{
+      lbImg.src = href;
+      overlay.classList.add('open');
+      reset();
+    }}
+
+    function close() {{
       overlay.classList.remove('open');
       lbImg.src = '';
+      reset();
+    }}
+
+    lbImg.addEventListener('load', () => {{
+      natW = lbImg.naturalWidth; natH = lbImg.naturalHeight;
     }});
+
+    document.querySelectorAll('a[data-lightbox]').forEach(a => {{
+      a.addEventListener('click', e => {{ e.preventDefault(); open(a.getAttribute('href')); }});
+    }});
+
+    // Chiude solo cliccando lo sfondo: sull'immagine il clic serve al pan.
+    overlay.addEventListener('click', e => {{ if (e.target === overlay) close(); }});
+    document.getElementById('lightbox-close').addEventListener('click', close);
+
+    overlay.addEventListener('wheel', e => {{
+      e.preventDefault();
+      zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.15 : 1 / 1.15);
+    }}, {{ passive: false }});
+
+    lbImg.addEventListener('dblclick', e => {{
+      e.preventDefault();
+      if (scale !== 0 && Math.abs(scale - 1) < 0.01) reset();
+      else {{ materialize(); zoomAt(e.clientX, e.clientY, 1 / scale); }}
+    }});
+
+    let dragging = false, sx = 0, sy = 0;
+    lbImg.addEventListener('pointerdown', e => {{
+      if (scale === 0) return;
+      dragging = true; sx = e.clientX - tx; sy = e.clientY - ty;
+      lbImg.classList.add('dragging');
+      lbImg.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    }});
+    lbImg.addEventListener('pointermove', e => {{
+      if (!dragging) return;
+      tx = e.clientX - sx; ty = e.clientY - sy;
+      render();
+    }});
+    lbImg.addEventListener('pointerup', e => {{
+      dragging = false; lbImg.classList.remove('dragging');
+      lbImg.releasePointerCapture(e.pointerId);
+    }});
+
+    document.querySelectorAll('#zoom-hud button').forEach(b => {{
+      b.addEventListener('click', e => {{
+        e.stopPropagation();
+        const k = b.dataset.zoom;
+        if (k === 'in') zoomAt(innerWidth / 2, innerHeight / 2, 1.3);
+        else if (k === 'out') zoomAt(innerWidth / 2, innerHeight / 2, 1 / 1.3);
+        else if (k === '100') setZoom(1);
+        else reset();
+      }});
+    }});
+
     document.addEventListener('keydown', e => {{
-      if (e.key === 'Escape') {{ overlay.classList.remove('open'); lbImg.src=''; }}
+      if (!overlay.classList.contains('open')) return;
+      if (e.key === 'Escape') close();
+      else if (e.key === '+' || e.key === '=') zoomAt(innerWidth / 2, innerHeight / 2, 1.3);
+      else if (e.key === '-') zoomAt(innerWidth / 2, innerHeight / 2, 1 / 1.3);
+      else if (e.key === '1') setZoom(1);
+      else if (e.key === '0') reset();
     }});
   </script>
 </body>

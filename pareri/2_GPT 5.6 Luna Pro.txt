@@ -1,0 +1,400 @@
+La mia valutazione sintetica è:
+
+> **Il warp è la parte giusta. Il problema non è correggere la forma, ma identificare automaticamente il riferimento semantico da correggere.**  
+> Su capi uniformi o con più balze equivalenti, quell’informazione spesso non è presente nell’immagine. Quindi l’automatismo completo non è garantibile; un sistema **semi-automatico guidato dalla zona delle clip** è invece molto realistico.
+
+## 1. Il rilevamento globale della “linea giusta” è concettualmente debole
+
+Il tuo secondo tentativo fallisce per una ragione strutturale, non per un dettaglio del Sobel.
+
+La domanda:
+
+> “Qual è la linea orizzontale più forte nella fascia alta?”
+
+non equivale alla domanda:
+
+> “Qual è la linea della vita che è stata deformata dalle clip?”
+
+Nel caso della gonna a balze, più bordi sono visivamente validi. Il gradiente non contiene necessariamente l’informazione per distinguerli. Il risultato di $+47.3^\circ$ è quindi esattamente ciò che ci si deve aspettare da un selettore basato sul massimo locale: ha trovato una corrispondenza sbagliata, non una misura rumorosa della linea corretta.
+
+Il vincolo di scarto verticale massimo tra sinistra e destra è utile, ma non sufficiente: può impedire di scegliere due balze diverse, però può comunque scegliere **la stessa balza sbagliata**.
+
+Anche Hough probabilmente non risolverebbe il problema: troverebbe meglio le linee, ma non saprebbe quale sia la vita.
+
+## 2. La pista migliore è usare la zona delle clip
+
+Questa è, secondo me, l’informazione più importante dell’intero problema.
+
+Non cercherei la vita in una fascia globale come il 4–35% dell’altezza. Cercherei una struttura locale **condizionata ai punti di contatto delle clip**.
+
+La pipeline dovrebbe quindi mantenere due maschere diverse:
+
+- `garment_mask`;
+- `clip_mask` o, meglio, la maschera completa degli oggetti da rimuovere, prima dell’inpainting.
+
+La stima geometrica va fatta preferibilmente sull’immagine originale, non solo su quella dopo LaMa. Dopo l’inpainting hai cancellato proprio l’evidenza causale che ti dice dove il tessuto è stato tirato.
+
+### Procedura possibile
+
+1. Trova le due componenti della maschera relativa alle clip.
+2. Per ciascuna componente calcola il punto di contatto con la maschera del capo.
+3. Ottieni due punti, ad esempio $p_L$ e $p_R$.
+4. Costruisci una regione di ricerca stretta sotto la zona delle clip.
+5. Cerca una linea o una traiettoria solo dentro quella regione.
+6. Usa il warp già esistente per riportare i due punti alla stessa quota o alla geometria attesa.
+
+In pseudocodice:
+
+```python
+contact_left, contact_right = estimate_clip_contacts(
+    clip_mask,
+    garment_mask
+)
+
+roi = build_local_roi(
+    contacts=(contact_left, contact_right),
+    garment_mask=garment_mask,
+    margin_down=0.12,
+    margin_side=0.08
+)
+
+candidates = detect_horizontal_structures(
+    image=original_image,
+    roi=roi,
+    exclude_mask=dilate(clip_mask, radius=20)
+)
+
+best = select_candidate_with_contact_prior(
+    candidates,
+    contacts=(contact_left, contact_right),
+    smoothness_weight=...,
+    distance_from_contacts_weight=...,
+    confidence_threshold=...
+)
+```
+
+Il punto importante è che il gradiente diventa soltanto una parte del punteggio, non il criterio principale.
+
+## 3. Non cercare necessariamente una linea: cerca una fascia locale
+
+Per una gonna a balze, la “vita” può essere:
+
+- parzialmente nascosta dalla clip;
+- poco contrastata;
+- non rappresentata da una singola linea;
+- confusa con la prima balza.
+
+Quindi userei un modello di **fascia deformata**, non di linea.
+
+Invece di stimare una sola curva $y(x)$, cerca una banda $B(x)$ con:
+
+- posizione vicina ai contatti delle clip;
+- larghezza limitata;
+- continuità;
+- orientamento prevalentemente orizzontale;
+- risposta di bordo eventualmente presente;
+- compatibilità con la sagoma laterale del capo.
+
+Formalmente, puoi assegnare a ogni candidato un costo del tipo:
+
+$$
+E(B) =
+\lambda_1 E_{\text{edge}}
++
+\lambda_2 E_{\text{smooth}}
++
+\lambda_3 E_{\text{contact}}
++
+\lambda_4 E_{\text{width}}
++
+\lambda_5 E_{\text{shape}}
+$$
+
+Dove:
+
+- $E_{\text{edge}}$ misura quanto la fascia coincide con bordi o cuciture;
+- $E_{\text{smooth}}$ penalizza pendenze e curvature irregolari;
+- $E_{\text{contact}}$ penalizza la distanza dai punti delle clip;
+- $E_{\text{width}}$ mantiene la fascia in un intervallo plausibile;
+- $E_{\text{shape}}$ misura la coerenza con la sagoma del capo.
+
+La ricerca può essere fatta con dynamic programming sulla griglia di possibili $y(x)$, con penalità su pendenza e curvatura.
+
+Però farei attenzione a non attribuire troppa importanza a $E_{\text{edge}}$. Su una gonna a balze potrebbe essere proprio il termine meno affidabile.
+
+## 4. Un’euristica probabilmente più robusta: “prima struttura stabile sotto le clip”
+
+Per il caso specifico che descrivi, proverei questa euristica prima di Hough o di un modello neurale:
+
+1. rileva i due contatti delle clip;
+2. proietta ciascun contatto verso il basso lungo una piccola colonna o una normale locale;
+3. cerca la prima struttura orizzontale stabile sotto ogni contatto;
+4. richiedi che le due strutture appartengano alla stessa fascia;
+5. se non c’è una struttura coerente, usa la geometria della sagoma invece del gradiente.
+
+“Prima” non significa necessariamente il primo picco del Sobel. Significa la prima fascia che:
+
+- persiste per una certa distanza orizzontale;
+- ha una variazione verticale limitata;
+- non è confinata a una singola piega;
+- è compatibile con entrambi i punti delle clip.
+
+Per evitare l’aggancio a balze diverse, non confronterei soltanto le quote assolute $y_L$ e $y_R$. Confronterei la distanza normalizzata dai rispettivi punti di contatto:
+
+$$
+d_L = y_L - y_{\text{clip},L}
+$$
+
+$$
+d_R = y_R - y_{\text{clip},R}
+$$
+
+e penalizzerei:
+
+$$
+|d_L - d_R|
+$$
+
+Questo è più sensato del confrontare direttamente $y_L$ e $y_R$, perché il capo può essere inclinato globalmente mentre le due clip possono trovarsi a quote diverse.
+
+## 5. Usa l’originale per la geometria, ma la maschera della gruccia come vincolo negativo
+
+Il comportamento che hai osservato è importante: sullo scatto grezzo ottenevi un risultato apparentemente migliore proprio perché la gruccia produceva un riferimento forte.
+
+Quindi non eliminerei completamente l’originale dalla fase di analisi. Farei invece così:
+
+- immagine originale: per stimare contatti e deformazione;
+- maschera della gruccia: per escludere la ferramenta dai gradienti;
+- immagine inpainted: per applicare il warp finale;
+- maschera dilatata della gruccia: per vietare al detector di usare bordi vicini alla ferramenta.
+
+In particolare, durante il rilevamento userei:
+
+```python
+analysis_exclusion = cv2.dilate(
+    hanger_and_clip_mask.astype(np.uint8),
+    elliptical_kernel,
+    iterations=1
+)
+```
+
+e azzererei o penalizzerei fortemente il segnale Sobel dentro quella regione.
+
+La gruccia non dovrebbe essere una feature; dovrebbe essere una **sorgente di informazione spaziale**.
+
+## 6. La simmetria può aiutare, ma non la userei come criterio principale
+
+La simmetria del capo è utile per stimare:
+
+- asse verticale;
+- posizione attesa dei fianchi;
+- larghezza del capo a una certa quota;
+- eventuali corrispondenze sinistra/destra.
+
+Puoi definire un asse $x_c$ e confrontare la sagoma sinistra e destra mediante:
+
+$$
+w_L(y) = x_c - x_{\text{left}}(y)
+$$
+
+$$
+w_R(y) = x_{\text{right}}(y) - x_c
+$$
+
+Poi cercare una trasformazione locale che riduca la differenza tra $w_L(y)$ e $w_R(y)$ in una zona vicina alle clip.
+
+Ma non assumerei che il capo debba essere perfettamente simmetrico:
+
+- alcuni capi sono asimmetrici;
+- le pieghe possono essere diverse sui due lati;
+- una gonna a balze può avere una caduta non identica a sinistra e destra;
+- la fotografia stessa può introdurre piccole differenze.
+
+La simmetria è quindi un buon **termine di regolarizzazione**, non una verità di riferimento.
+
+## 7. DeepFashion2: possibile, ma probabilmente non come prima soluzione
+
+DeepFashion2 definisce 294 landmark distribuiti su 13 categorie, ma questo non significa che offra direttamente un landmark affidabile per ogni tipo di gonna e per ogni fascia della vita. ([github.com](https://github.com/switchablenorms/deepfashion2?utm_source=openai))
+
+I lavori sui fashion landmark mostrano che il problema è affrontabile, ma normalmente richiede:
+
+- categorie definite;
+- landmark semanticamente annotati;
+- immagini abbastanza varie;
+- adattamento al dominio;
+- gestione delle occlusioni e delle deformazioni del tessuto. ([arxiv.org](https://arxiv.org/abs/2005.00419?utm_source=openai))
+
+Nel tuo caso la differenza di dominio è sostanziale:
+
+- immagini e-commerce controllate;
+- capo su gruccia invece che indossato;
+- fondo bianco;
+- tessuti bianchi o poco contrastati;
+- deformazione specifica causata dalle clip;
+- obiettivo molto preciso: stimare pochi punti di controllo per un warp.
+
+Perciò non userei un modello generico che predice 294 landmark. Sarebbe sovradimensionato e probabilmente non risolverebbe proprio l’ambiguità principale: **quale tra più strutture orizzontali è quella che l’operatore vuole correggere**.
+
+Se vuoi usare il machine learning, farei qualcosa di molto più piccolo:
+
+```text
+input:
+    crop del capo
+    garment mask
+    clip mask
+    due punti/regioni di contatto
+    eventualmente edge maps
+
+output:
+    punto sinistro della fascia target
+    punto destro della fascia target
+    larghezza della fascia
+    confidenza
+```
+
+Il modello non dovrebbe generare l’immagine. Dovrebbe soltanto predire i parametri del warp. Questo è compatibile con il tuo vincolo non generativo.
+
+Ancora meglio: raccoglierei 200–1000 esempi annotati dal retoucher, con:
+
+- i due punti che cliccherebbe;
+- eventuale intervallo verticale della fascia;
+- tipo di capo;
+- “nessuna correzione necessaria”;
+- confidenza o difficoltà.
+
+Un piccolo modello o anche un regressore sui descrittori potrebbe funzionare meglio di un modello di landmark generico, perché impara esattamente la convenzione visiva del tuo catalogo.
+
+## 8. La soluzione che consiglierei davvero: sistema semi-automatico
+
+Io realizzerei tre modalità.
+
+### Modalità A — automatica ad alta confidenza
+
+Il sistema corregge da solo solo quando:
+
+- i contatti delle clip sono ben localizzati;
+- esiste una fascia candidata coerente;
+- la differenza normalizzata $|d_L-d_R|$ è bassa;
+- la stima della deformazione è moderata;
+- il warp non modifica zone congelate;
+- la struttura selezionata è abbastanza lontana dalla gruccia residua.
+
+### Modalità B — un clic per lato
+
+L’operatore clicca approssimativamente:
+
+- sulla fascia della vita a sinistra;
+- sulla fascia della vita a destra.
+
+Il sistema poi:
+
+1. aggancia ciascun clic alla struttura locale;
+2. stima la linea o fascia;
+3. calcola il campo di spostamento;
+4. mostra una preview;
+5. permette di correggere intensità e raggio.
+
+Questa sarebbe probabilmente la modalità più produttiva.
+
+### Modalità C — due clic e applicazione diretta
+
+Se il retoucher sa già quali sono i punti giusti, non serve neanche cercare automaticamente la linea. I due clic diventano direttamente due trascinamenti:
+
+```text
+punto osservato -> punto desiderato
+```
+
+Il tuo motore esiste già e funziona. Aggiungerei solo:
+
+- preview a bassa risoluzione;
+- overlay della griglia;
+- slider di intensità;
+- undo;
+- preset per categoria di capo;
+- salvataggio dei parametri JSON.
+
+Esempio:
+
+```json
+{
+  "anchors": [
+    {
+      "x0": 1120,
+      "y0": 1030,
+      "x1": 1120,
+      "y1": 980,
+      "radius": 420,
+      "strength": 0.85
+    },
+    {
+      "x0": 2440,
+      "y0": 1180,
+      "x1": 2440,
+      "y1": 980,
+      "radius": 420,
+      "strength": 0.85
+    }
+  ],
+  "frozen_regions": [
+    [850, 3400, 2850, 6600]
+  ]
+}
+```
+
+## 9. Una possibile semplificazione: l’operatore indica solo la quota target
+
+Potresti ridurre ulteriormente il lavoro manuale.
+
+L’operatore clicca:
+
+- una volta sulla vita a sinistra;
+- una volta sulla vita a destra.
+
+Il sistema non chiede di indicare la destinazione. Calcola automaticamente una quota comune, per esempio:
+
+$$
+y_{\text{target}} =
+\frac{w_L y_L + w_R y_R}{w_L+w_R}
+$$
+
+dove i pesi possono dipendere dalla qualità locale del segnale.
+
+Oppure l’operatore clicca una sola volta sulla fascia desiderata e il sistema usa i punti di contatto delle clip per stimare la corrispondenza sul lato opposto.
+
+Questo elimina quasi completamente il problema del rilevamento automatico, pur mantenendo il grosso del vantaggio produttivo.
+
+## 10. Cosa non inseguirei
+
+Non investirei molto, almeno inizialmente, in:
+
+- un detector generico basato sul massimo Sobel;
+- Hough globale su tutto il capo;
+- simmetria rigida;
+- un modello 3D del tessuto;
+- TPS o modelli di cloth simulation;
+- landmark detection generica addestrata su immagini di abiti indossati.
+
+I modelli di warping per virtual try-on e garment deformation sono in genere orientati ad allineare un capo a un corpo o a una posa, non a recuperare la precisa intenzione del retoucher in una fotografia di prodotto. Inoltre molti lavori combinano warping e sintesi, mentre tu vuoi deliberatamente una trasformazione puramente pixel-based. ([link.springer.com](https://link.springer.com/article/10.1007/s11042-026-21423-2?utm_source=openai))
+
+## Conclusione
+
+La risposta onesta è:
+
+- **automatizzare il rilevamento globale della linea corretta:** fragile;
+- **usare la maschera delle clip per localizzare la zona:** molto promettente;
+- **usare Sobel/Hough dentro quella zona:** utile, ma solo come evidenza secondaria;
+- **modello generico di landmark:** probabilmente eccessivo;
+- **modello piccolo addestrato sui clic del tuo retoucher:** eventualmente interessante;
+- **semi-manuale con due clic:** probabilmente la soluzione industrialmente migliore.
+
+La strategia che implementerei per prima è:
+
+1. conservare l’immagine originale e la maschera delle clip;
+2. stimare automaticamente i due punti di contatto;
+3. restringere la ricerca a una fascia locale sotto quei punti;
+4. cercare una traiettoria continua con vincolo sulla distanza dai contatti;
+5. rifiutare automaticamente i casi ambigui;
+6. offrire due clic come fallback immediato;
+7. raccogliere quei clic come dataset per un eventuale modello futuro.
+
+In altre parole: **non cercare di risolvere con la computer vision un’ambiguità che l’immagine non contiene. Usa la computer vision per portare l’operatore esattamente nel posto giusto, poi lascia a lui una decisione locale molto economica.**
