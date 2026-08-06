@@ -186,6 +186,63 @@
   <button class="ghost" id="resetSess" style="display:none">Ricomincia dall'originale</button>
   <div id="passInfo" class="hint" style="margin-top:8px"></div>
   <button class="ghost" id="swap">Confronta con l'altro detector</button>
+
+  <hr style="border:0;border-top:1px solid #2a2a2e;margin:18px 0 14px">
+
+  <h3 style="font-size:0.95rem;margin:0 0 6px">Correzione forma (Liquify)</h3>
+  <div class="hint" style="margin-bottom:10px">
+    Sposta il tessuto che c'è, non ne inventa. Va fatta <b>dopo</b> la
+    rimozione gruccia.
+  </div>
+
+  <div id="warpPassi" class="hint" style="line-height:1.7;margin-bottom:10px">
+    <div id="passo1"><b>1.</b> Apri il capo</div>
+    <div id="passo2" style="opacity:.45"><b>2.</b> Clicca <b>più punti</b> lungo la linea storta</div>
+    <div id="passo3" style="opacity:.45"><b>3.</b> Applica</div>
+  </div>
+
+  <button class="ghost" id="warpApri">1 · Apri il capo</button>
+
+  <label style="margin-top:12px">Strumento</label>
+  <select id="warpModo">
+    <option value="linea">Appiattisci una linea — più clic (consigliato)</option>
+    <option value="tratti">Trascina il tessuto (Liquify libero)</option>
+    <option value="congela">Congela una zona (non si deve muovere)</option>
+  </select>
+  <div class="hint" id="warpModoHint">
+    <b>Clicca un punto</b> all'estremo sinistro della linea storta (es. la
+    vita), poi <b>un altro</b> a destra. La linea verde tratteggiata mostra
+    dove finirà.
+  </div>
+
+  <div id="warpAvanzate" style="display:none">
+    <div class="row" style="margin-top:8px">
+      <div>
+        <label>Raggio d'influenza</label>
+        <input id="warpRaggio" type="number" step="0.01" min="0.02" max="0.6" value="0.12">
+      </div>
+      <div>
+        <label>Forza</label>
+        <input id="warpForza" type="number" step="0.1" min="0.1" max="1" value="1">
+      </div>
+    </div>
+    <div class="hint">Quanto tessuto attorno si trascina dietro il punto.</div>
+  </div>
+
+  <label style="display:flex;gap:8px;align-items:center;margin-top:10px">
+    <input type="checkbox" id="warpVerticale" style="width:auto">
+    Raddrizza in verticale invece che in orizzontale
+  </label>
+
+  <label style="display:flex;gap:8px;align-items:center;margin-top:6px">
+    <input type="checkbox" id="warpCongelaOrlo" checked style="width:auto">
+    Tieni fermo il fondo del capo
+  </label>
+  <div class="hint">Evita che la correzione si trascini dietro tutto il capo.</div>
+
+  <button id="warpApplica" style="margin-top:10px">Applica correzione</button>
+  <button class="ghost" id="warpAnnulla">Cancella i segni</button>
+  <div id="warpInfo" class="hint" style="margin-top:8px"></div>
 </aside>
 
 <section class="work">
@@ -324,6 +381,329 @@ async function poll(){
     ? 'Zona selezionata: la prossima passata cercherà solo lì.'
     : 'Nessuna zona selezionata: la prossima passata cercherà su tutta l\'immagine.';
 }
+// --- correzione forma (Liquify semi-manuale) ---
+// L'operatore indica DOVE e QUANTO; il server deforma. Niente stima
+// automatica: sui capi reali il profilo scende in diagonale di suo, quindi
+// misurare l'inclinazione non dice se il capo e' storto.
+const warp = {
+  img: null,          // Image caricata
+  linea: null,        // {x0,y0,x1,y1} relative
+  puntiLinea: [],     // clic in attesa del secondo (modo linea)
+  hover: null,        // posizione mouse, per l'anteprima del 2° punto
+  tratti: [],         // [{x0,y0,x1,y1}] relative
+  congelate: [],      // [{x0,y0,x1,y1}] relative
+  trascina: null,     // trascinamento in corso
+};
+
+const MODO_HINT = {
+  linea: "<b>Clicca più punti</b> seguendo la linea storta (3-5, compreso l'avvallamento centrale). Verranno portati tutti alla quota verde tratteggiata.",
+  tratti: "<b>Trascina</b> dal punto da spostare fino a dove deve arrivare. Puoi fare più trascinamenti.",
+  congela: "<b>Trascina</b> per marcare un rettangolo che NON si deve muovere."
+};
+$('warpModo').onchange = () => {
+  const m = $('warpModo').value;
+  $('warpModoHint').innerHTML = MODO_HINT[m];
+  // il raggio serve solo al Liquify libero: per la linea lo calcola il server
+  $('warpAvanzate').style.display = (m === 'tratti') ? 'block' : 'none';
+  warp.linea = null; warp.puntiLinea = [];
+  warpRidisegna(); warpAggiornaPassi();
+};
+
+// Evidenzia il passo in cui si trova l'operatore: senza questo non si capisce
+// cosa ci si aspetta da lui (feedback dell'utente sulla versione precedente).
+function warpAggiornaPassi(){
+  const aperto = !!warp.img;
+  const pronto = warp.puntiLinea.length >= 2 || warp.tratti.length > 0;
+  $('passo1').style.opacity = aperto ? '.45' : '1';
+  $('passo2').style.opacity = (aperto && !pronto) ? '1' : '.45';
+  $('passo3').style.opacity = pronto ? '1' : '.45';
+  $('warpApplica').disabled = !pronto;
+}
+
+function warpRidisegna(){
+  const cv = $('warpCanvas'); if(!cv || !warp.img) return;
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0,0,cv.width,cv.height);
+  ctx.drawImage(warp.img, 0, 0, cv.width, cv.height);
+  const W = cv.width, H = cv.height;
+
+  // zone congelate
+  ctx.fillStyle = 'rgba(80,140,255,0.22)';
+  ctx.strokeStyle = 'rgba(80,140,255,0.9)'; ctx.lineWidth = 2;
+  warp.congelate.forEach(z=>{
+    const x=Math.min(z.x0,z.x1)*W, y=Math.min(z.y0,z.y1)*H;
+    const w=Math.abs(z.x1-z.x0)*W, h=Math.abs(z.y1-z.y0)*H;
+    ctx.fillRect(x,y,w,h); ctx.strokeRect(x,y,w,h);
+  });
+
+  // linea da raddrizzare
+  if(warp.linea){
+    const l = warp.linea;
+    ctx.strokeStyle = '#ff3b30'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(l.x0*W,l.y0*H); ctx.lineTo(l.x1*W,l.y1*H); ctx.stroke();
+    // dove finirà (orizzontale/verticale alla quota media)
+    ctx.strokeStyle = 'rgba(52,199,89,0.9)'; ctx.setLineDash([7,5]);
+    ctx.beginPath();
+    if($('warpVerticale').checked){
+      const xm=(l.x0+l.x1)/2*W; ctx.moveTo(xm,l.y0*H); ctx.lineTo(xm,l.y1*H);
+    } else {
+      const ym=(l.y0+l.y1)/2*H; ctx.moveTo(l.x0*W,ym); ctx.lineTo(l.x1*W,ym);
+    }
+    ctx.stroke(); ctx.setLineDash([]);
+    [[l.x0,l.y0],[l.x1,l.y1]].forEach(p=>{
+      ctx.fillStyle='#ff3b30'; ctx.beginPath();
+      ctx.arc(p[0]*W,p[1]*H,6,0,7); ctx.fill();
+    });
+  }
+
+  // punti cliccati lungo la linea storta, con la quota di destinazione
+  if(warp.puntiLinea.length){
+    const pts = warp.puntiLinea.slice().sort((a,b)=>a.x-b.x);
+    // spezzata rossa: la linea com'è ADESSO
+    ctx.strokeStyle='#ff3b30'; ctx.lineWidth=3;
+    ctx.beginPath();
+    pts.forEach((p,i)=> i ? ctx.lineTo(p.x*W,p.y*H) : ctx.moveTo(p.x*W,p.y*H));
+    ctx.stroke();
+    // anteprima verso il mouse
+    if(warp.hover){
+      const last = pts[pts.length-1];
+      ctx.setLineDash([6,5]); ctx.strokeStyle='rgba(255,59,48,0.6)';
+      ctx.beginPath(); ctx.moveTo(last.x*W,last.y*H);
+      ctx.lineTo(warp.hover.x*W,warp.hover.y*H); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    // quota di destinazione (mediana): dove finiranno tutti i punti
+    if(pts.length >= 2){
+      const ys = pts.map(p=>p.y).sort((a,b)=>a-b);
+      const med = ys.length%2 ? ys[(ys.length-1)/2]
+                              : (ys[ys.length/2-1]+ys[ys.length/2])/2;
+      ctx.strokeStyle='rgba(52,199,89,0.95)'; ctx.lineWidth=3;
+      ctx.setLineDash([8,5]);
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x*W, med*H); ctx.lineTo(pts[pts.length-1].x*W, med*H);
+      ctx.stroke(); ctx.setLineDash([]);
+      // frecce: di quanto e in che verso si muove ogni punto
+      ctx.strokeStyle='rgba(52,199,89,0.6)'; ctx.lineWidth=2;
+      pts.forEach(p=>{
+        ctx.beginPath(); ctx.moveTo(p.x*W,p.y*H); ctx.lineTo(p.x*W,med*H); ctx.stroke();
+      });
+    }
+    pts.forEach((p,i)=>{
+      ctx.fillStyle='#ff3b30';
+      ctx.beginPath(); ctx.arc(p.x*W,p.y*H,7,0,7); ctx.fill();
+      ctx.strokeStyle='#fff'; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.arc(p.x*W,p.y*H,7,0,7); ctx.stroke();
+      ctx.fillStyle='#fff'; ctx.font='bold 11px sans-serif';
+      ctx.fillText(String(i+1), p.x*W-3, p.y*H-11);
+    });
+  }
+
+  // trascinamenti
+  ctx.strokeStyle='#ffcc00'; ctx.fillStyle='#ffcc00'; ctx.lineWidth=3;
+  warp.tratti.forEach(t=>{
+    ctx.beginPath(); ctx.moveTo(t.x0*W,t.y0*H); ctx.lineTo(t.x1*W,t.y1*H); ctx.stroke();
+    ctx.beginPath(); ctx.arc(t.x0*W,t.y0*H,5,0,7); ctx.fill();
+    ctx.beginPath(); ctx.arc(t.x1*W,t.y1*H,8,0,7); ctx.stroke();
+    // raggio d'influenza
+    ctx.strokeStyle='rgba(255,204,0,0.35)';
+    ctx.beginPath();
+    ctx.arc(t.x0*W,t.y0*H, parseFloat($('warpRaggio').value)*Math.max(W,H),0,7);
+    ctx.stroke();
+    ctx.strokeStyle='#ffcc00';
+  });
+
+  // trascinamento in corso
+  const d = warp.trascina;
+  if(d){
+    ctx.strokeStyle='#fff'; ctx.setLineDash([5,4]); ctx.lineWidth=2;
+    ctx.beginPath();
+    if(d.modo==='congela'){
+      ctx.strokeRect(Math.min(d.x0,d.x1)*W, Math.min(d.y0,d.y1)*H,
+                     Math.abs(d.x1-d.x0)*W, Math.abs(d.y1-d.y0)*H);
+    } else {
+      ctx.moveTo(d.x0*W,d.y0*H); ctx.lineTo(d.x1*W,d.y1*H); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+}
+
+$('warpApri').onclick = async () => {
+  const f = $('file').value;
+  if(!f){ $('warpInfo').innerHTML = '<span class="warn">Scegli prima un capo.</span>'; return; }
+  $('warpApri').disabled = true;
+  $('warpInfo').textContent = 'Carico…';
+  try{
+    const r = await (await fetch('/api/warp/immagine?filename='+encodeURIComponent(f))).json();
+    if(r.error){ $('warpInfo').innerHTML = `<span class="warn">${r.error}</span>`; return; }
+
+    warp.linea=null; warp.puntiLinea=[]; warp.hover=null;
+    warp.tratti=[]; warp.congelate=[]; warp.trascina=null;
+    $('metrics').innerHTML='';
+    $('out').innerHTML = `
+      <div class="selhint">${r.da_sessione
+        ? 'Stai correggendo il risultato della rimozione gruccia.'
+        : '<b>Attenzione:</b> è l\'immagine originale, la gruccia c\'è ancora. Di solito conviene prima <b>Elabora</b>.'}
+        <br>Disegna sul capo secondo lo strumento scelto a sinistra.</div>
+      <canvas id="warpCanvas" style="max-width:100%;border:1px solid #2a2a2e;
+        border-radius:8px;cursor:crosshair;background:#000"></canvas>`;
+
+    const im = new Image();
+    im.onload = () => {
+      warp.img = im;
+      const cv = $('warpCanvas');
+      const maxw = Math.min(900, cv.parentElement.clientWidth||900);
+      const sc = Math.min(maxw/im.width, 760/im.height);
+      cv.width = Math.round(im.width*sc);
+      cv.height = Math.round(im.height*sc);
+      warpRidisegna();
+      warpEventi(cv);
+      warpAggiornaPassi();
+      $('warpInfo').innerHTML =
+        `Capo ${r.w}×${r.h}px — <b>clicca il primo punto</b> sulla linea da raddrizzare.`;
+    };
+    im.src = r.img;
+  } catch(e){
+    $('warpInfo').innerHTML = `<span class="warn">${e}</span>`;
+  } finally {
+    $('warpApri').disabled = false;
+  }
+};
+
+function warpEventi(cv){
+  const rel = e => {
+    const b = cv.getBoundingClientRect();
+    return {x:(e.clientX-b.left)/b.width, y:(e.clientY-b.top)/b.height};
+  };
+
+  // MODO LINEA: due CLIC, non un trascinamento. Il trascinamento non era
+  // scopribile — l'operatore non capiva cosa dovesse fare.
+  cv.onclick = e => {
+    if($('warpModo').value !== 'linea') return;
+    // Si raccolgono N punti, non 2: la vita tirata dalle clip è una V, e con
+    // due soli punti la V verrebbe ruotata invece che appiattita.
+    warp.puntiLinea.push(rel(e));
+    const n = warp.puntiLinea.length;
+    if(n === 1){
+      $('warpInfo').innerHTML =
+        'Primo punto — <b>continua a cliccare seguendo la linea storta</b> ' +
+        '(anche nell\'avvallamento centrale).';
+    } else {
+      const ys = warp.puntiLinea.map(p=>p.y);
+      const disl = Math.round((Math.max(...ys)-Math.min(...ys))*warp.img.height);
+      $('warpInfo').innerHTML =
+        `${n} punti — dislivello ${disl}px. Aggiungine altri o premi <b>Applica</b>.`;
+    }
+    warpRidisegna(); warpAggiornaPassi();
+  };
+
+  // anteprima del secondo punto mentre si muove il mouse
+  cv.onmousemove = e => {
+    if($('warpModo').value !== 'linea' || !warp.puntiLinea.length) return;
+    warp.hover = rel(e);
+    warpRidisegna();
+  };
+  cv.onmouseleave = () => { warp.hover = null; warpRidisegna(); };
+
+  // MODO TRATTI / CONGELA: trascinamento (qui è naturale: si vede la freccia)
+  cv.onpointerdown = e => {
+    const m = $('warpModo').value;
+    if(m === 'linea') return;
+    const p = rel(e);
+    warp.trascina = {modo:m, x0:p.x, y0:p.y, x1:p.x, y1:p.y};
+    cv.setPointerCapture(e.pointerId);
+  };
+  cv.onpointermove = e => {
+    if(!warp.trascina) return;
+    const p = rel(e);
+    warp.trascina.x1=p.x; warp.trascina.y1=p.y;
+    warpRidisegna();
+  };
+  cv.onpointerup = e => {
+    const d = warp.trascina; warp.trascina=null;
+    if(!d) return;
+    if(Math.hypot(d.x1-d.x0, d.y1-d.y0) < 0.005){ warpRidisegna(); return; }
+    if(d.modo==='tratti')  warp.tratti.push({x0:d.x0,y0:d.y0,x1:d.x1,y1:d.y1});
+    if(d.modo==='congela') warp.congelate.push({x0:d.x0,y0:d.y0,x1:d.x1,y1:d.y1});
+    warpRidisegna(); warpAggiornaPassi();
+  };
+}
+
+$('warpVerticale').onchange = warpRidisegna;
+$('warpRaggio').oninput = warpRidisegna;
+
+$('warpAnnulla').onclick = () => {
+  warp.linea=null; warp.puntiLinea=[]; warp.hover=null;
+  warp.tratti=[]; warp.congelate=[];
+  warpRidisegna(); warpAggiornaPassi();
+  $('warpInfo').innerHTML = 'Segni cancellati — <b>clicca lungo la linea storta</b>.';
+};
+
+$('warpApplica').onclick = async () => {
+  const f = $('file').value;
+  if(!f){ $('warpInfo').innerHTML = '<span class="warn">Scegli prima un capo.</span>'; return; }
+  if(warp.puntiLinea.length < 2 && !warp.tratti.length){
+    $('warpInfo').innerHTML = '<span class="warn">Clicca prima <b>due punti</b> sulla linea da raddrizzare.</span>';
+    return;
+  }
+  $('warpApplica').disabled = true;
+  $('warpInfo').textContent = 'Applico…';
+  try{
+    // Il fondo del capo va tenuto fermo quasi sempre: senza, la correzione
+    // della vita si trascina dietro tutta la gonna. Si aggiunge in automatico
+    // sotto la linea tracciata, così l'operatore non deve pensarci.
+    const congelate = warp.congelate.slice();
+    if($('warpCongelaOrlo').checked && warp.puntiLinea.length >= 2){
+      const yMax = Math.max(...warp.puntiLinea.map(p=>p.y));
+      congelate.push({x0:0, y0:Math.min(0.98, yMax + 0.28), x1:1, y1:1});
+    }
+    const body = {
+      filename: f,
+      congelate,
+      orizzontale: !$('warpVerticale').checked,
+      nota: $('nota').value,
+    };
+    if(warp.puntiLinea.length >= 2){
+      const pts = warp.puntiLinea.slice().sort((a,b)=>a.x-b.x);
+      body.punti = pts.map(p=>[p.x,p.y]);
+    } else {
+      const r = parseFloat($('warpRaggio').value), fz = parseFloat($('warpForza').value);
+      body.tratti = warp.tratti.map(t=>({...t, raggio:r, forza:fz}));
+    }
+    const r = await (await fetch('/api/warp/applica',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)})).json();
+    if(r.error){ $('warpInfo').innerHTML = `<span class="warn">${r.error}</span>`; return; }
+
+    const nota = r.info.nota ? ' — '+r.info.nota : '';
+    $('warpInfo').innerHTML =
+      `Fatto in ${r.secondi}s — spostamento max ${r.info.spostamento_max}px${nota}.`;
+    $('out').innerHTML = `
+      <div class="selhint">Correzione applicata${nota}. Il risultato è ora la
+        base della sessione: puoi correggere ancora, o riaprire il capo per
+        un altro ritocco.</div>
+      <div class="imgs">
+        <figure><img src="${r.before}"><figcaption>Prima</figcaption></figure>
+        <figure><img src="${r.after}"><figcaption>Dopo la correzione</figcaption></figure>
+      </div>
+      <a class="dl" href="${r.download}" download="${r.download_name}">Scarica il risultato a piena risoluzione</a>`;
+    document.querySelectorAll('.imgs img').forEach(i=>{
+      i.onclick=()=>{ $('ovlimg').src=i.src; $('ovl').classList.add('on'); };
+    });
+    $('resetSess').style.display='block';
+    // il capo corretto diventa la base: per un altro ritocco si riapre,
+    // quindi i segni vecchi non servono più
+    warp.linea=null; warp.puntiLinea=[]; warp.tratti=[]; warp.img=null;
+    warpAggiornaPassi();
+  } catch(e){
+    $('warpInfo').innerHTML = `<span class="warn">${e}</span>`;
+  } finally {
+    $('warpApplica').disabled = false;
+  }
+};
+
+// stato iniziale dei passi
+warpAggiornaPassi();
+
 // --- caricamento immagini (drag&drop o click) ---
 const drop = $('drop');
 drop.onclick = ()=> $('fileInput').click();

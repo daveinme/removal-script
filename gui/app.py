@@ -31,6 +31,10 @@ import uvicorn
 ROOT = Path(__file__).parent.parent
 SCOUT = ROOT.parent
 sys.path.insert(0, str(ROOT))
+# src/ contiene scout_warp, il modulo di raddrizzamento: e' autonomo (non
+# importa nulla della GUI) proprio perche' lo stesso codice andra' usato da
+# scout_api nella pipeline batch.
+sys.path.insert(0, str(ROOT / "src"))
 
 # Le immagini caricate vivono SOLO in memoria, per la sessione corrente: niente
 # scritture su disco, così un refresh riparte sempre pulito. Scelta voluta in
@@ -917,6 +921,158 @@ async def api_session_reset():
     """Riparte dall'immagine originale, scartando le passate fatte."""
     SESSION.update({"filename": None, "current": None, "passes": []})
     return {"ok": True}
+
+
+# ----------------------------------------------------------------- warping
+
+class Tratto(BaseModel):
+    """Un trascinamento: prendi il tessuto in (x0,y0), portalo in (x1,y1).
+    Coordinate RELATIVE 0-1, così la pagina può lavorare sull'anteprima
+    ridotta e il server applicare a piena risoluzione."""
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    raggio: float = 0.12            # frazione del lato lungo dell'immagine
+    forza: float = 1.0
+
+
+class Zona(BaseModel):
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+
+class WarpReq(BaseModel):
+    filename: str
+    # modo "tratti": trascinamenti liberi (il Liquify vero e proprio)
+    tratti: list[Tratto] = []
+    # modo "linea": due punti da portare in orizzontale (o verticale)
+    linea: list[float] | None = None      # [x0,y0,x1,y1] relative
+    # modo "curva": N punti (>=2) portati tutti alla stessa quota. È il caso
+    # reale più frequente — la vita tirata dalle clip forma una V, e con due
+    # soli punti si ruoterebbe la V invece di appiattirla.
+    punti: list[list[float]] = []         # [[x,y], ...] relative
+    orizzontale: bool = True
+    fascia: float = 0.0                   # 0 = automatica dalla lunghezza
+    congelate: list[Zona] = []
+    nota: str = ""
+
+
+def _immagine_di_lavoro(filename: str):
+    """L'immagine su cui lavorare: il risultato della rimozione gruccia se
+    c'e', altrimenti l'originale.
+
+    Il warping va misurato DOPO la rimozione: sulla foto grezza la sagoma
+    include gancio e staffa, e si finisce per misurare la ferramenta invece
+    del capo (verificato: angoli di +60° su capi che pendono di 2°).
+    """
+    if SESSION["current"] is not None and SESSION["filename"] == filename:
+        return SESSION["current"].copy(), None, True
+    raw = UPLOADS.get(filename)
+    if raw is None:
+        raise FileNotFoundError(
+            f"'{filename}' non è più in memoria — ricaricala trascinandola.")
+    rgb, alpha = load_rgb(raw)
+    return rgb, alpha, False
+
+
+@app.get("/api/warp/immagine")
+async def api_warp_immagine(filename: str):
+    """L'immagine su cui l'operatore disegnerà i tratti.
+
+    È il risultato della rimozione gruccia se c'è: il warp si fa dopo, su un
+    capo già pulito.
+    """
+    try:
+        rgb, alpha, da_sessione = _immagine_di_lavoro(filename)
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    h, w = rgb.shape[:2]
+    return {
+        "img": to_data_uri(rgb),
+        "w": w, "h": h,
+        "da_sessione": da_sessione,
+    }
+
+
+@app.post("/api/warp/applica")
+async def api_warp_applica(req: WarpReq):
+    """Applica la deformazione indicata a mano e restituisce prima/dopo.
+
+    Le coordinate arrivano relative (0-1) e vengono scalate qui alla
+    risoluzione piena: così la pagina lavora su un'anteprima leggera ma la
+    correzione è applicata sull'originale senza perdita.
+    """
+    from scout_warp import applica_tratti, applica_linea, applica_curva
+
+    try:
+        rgb, alpha, _ = _immagine_di_lavoro(req.filename)
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+
+    h, w = rgb.shape[:2]
+    lato = float(max(h, w))
+    congelate = [{"x0": z.x0 * w, "y0": z.y0 * h, "x1": z.x1 * w, "y1": z.y1 * h}
+                 for z in req.congelate]
+
+    t0 = time.time()
+    try:
+        if req.punti and len(req.punti) >= 2:
+            pts = [(p[0] * w, p[1] * h) for p in req.punti]
+            fascia = req.fascia * lato if req.fascia else None
+            out, out_a, info = applica_curva(
+                rgb, pts, alpha, altezza_fascia=fascia, congelate=congelate)
+            operazione = "warp_curva"
+        elif req.linea and len(req.linea) == 4:
+            x0, y0, x1, y1 = req.linea
+            fascia = req.fascia * lato if req.fascia else None
+            out, out_a, info = applica_linea(
+                rgb, (x0 * w, y0 * h), (x1 * w, y1 * h), alpha,
+                altezza_fascia=fascia, congelate=congelate,
+                orizzontale=req.orizzontale)
+            operazione = "warp_linea"
+        elif req.tratti:
+            tratti = [{"x0": t.x0 * w, "y0": t.y0 * h,
+                       "x1": t.x1 * w, "y1": t.y1 * h,
+                       "raggio": t.raggio * lato, "forza": t.forza}
+                      for t in req.tratti]
+            out, out_a, info = applica_tratti(rgb, tratti, alpha, congelate)
+            operazione = "warp_tratti"
+        else:
+            return JSONResponse(
+                {"error": "Nessuna correzione indicata: clicca almeno due "
+                          "punti sulla linea, o traccia un trascinamento."},
+                status_code=400)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
+
+    SESSION["filename"] = req.filename
+    SESSION["current"] = out
+
+    rec = {
+        "capo": req.filename, "operazione": operazione,
+        "tratti": info.get("tratti", 0),
+        "spostamento_max_px": info.get("spostamento_max", 0.0),
+        "congelate": len(congelate),
+        "nota": req.nota, "secondi": round(time.time() - t0, 1),
+    }
+    SESSION["passes"].append(rec)
+    save_pass(rec)
+
+    ok, buf = cv2.imencode(".png", out)
+    stem = Path(req.filename).stem
+    return {
+        "before": to_data_uri(rgb),
+        "after": to_data_uri(out),
+        "info": info,
+        "secondi": rec["secondi"],
+        "download": ("data:image/png;base64," + base64.b64encode(buf).decode()) if ok else None,
+        "download_name": f"{stem}_corretta.png",
+    }
 
 
 @app.post("/api/reset")
