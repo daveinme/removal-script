@@ -407,7 +407,13 @@ def inpaint_qwen(rgb, md, steps=30, quant="Q5_K_M", garment="felpa"):
         cmd = [str(venv_python), str(engine_script), str(in_path), str(mask_path),
                str(out_path), "--quant", quant, "--steps", str(steps), "--garment", garment]
         log(f"  Qwen (subprocess venv-qwen): quant={quant} steps={steps}")
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        # encoding esplicito: la barra di progresso di huggingface_hub/tqdm
+        # usa caratteri unicode (es. "━"), e la locale di default su alcune
+        # istanze Vast e' ASCII puro — senza questo il decode del subprocess
+        # crasha (UnicodeDecodeError) invece di far fallire solo Qwen.
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", env=env)
         for line in proc.stdout.splitlines():
             log(f"  [qwen] {line}")
         if proc.returncode != 0:
