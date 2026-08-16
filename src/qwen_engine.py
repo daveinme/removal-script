@@ -88,6 +88,10 @@ def carica_pipeline(quant: str):
         transformer=transformer,
         dtype=torch.bfloat16,
     )
+    # Il dtype globale non sempre si propaga al VAE quando il transformer e'
+    # gia' un'istanza esplicita (osservato: VAE restava float32, mismatch
+    # con l'input bf16 durante l'encode -> RuntimeError). Forzato a mano.
+    pipe.vae.to(torch.bfloat16)
     # Il text encoder (Qwen2.5-VL, ~16GB bf16) serve solo per codificare il
     # prompt: lo si tiene su GPU solo per quel passo, poi si scarica, cosi'
     # transformer GGUF (~11-14GB) + VAE restano soli in VRAM durante i passi
