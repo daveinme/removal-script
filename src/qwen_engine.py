@@ -69,8 +69,13 @@ def carica_pipeline(quant: str):
     # che riusa la cache di setup_qwen.sh senza riscaricare nulla.
     gguf_path = hf_hub_download(REPO_GGUF, gguf_file)
     log(f"  path locale: {gguf_path} ({time.time()-t0:.1f}s)")
+    # from_single_file non riconosce l'architettura dal solo file GGUF e
+    # cade sul default sbagliato (stable-diffusion-v1-5): serve indicare
+    # esplicitamente dove prendere il config.json del transformer Qwen.
     transformer = QwenImageTransformer2DModel.from_single_file(
         gguf_path,
+        config=BASE_PIPELINE,
+        subfolder="transformer",
         quantization_config=GGUFQuantizationConfig(compute_dtype=torch.bfloat16),
         dtype=torch.bfloat16,
     )
