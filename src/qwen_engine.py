@@ -44,12 +44,7 @@ CONTEXT_MARGIN_PX = 220
 EDIT_MASK_DILATE_PX = 8   # poco: la mask deve restare stretta sulla gruccia
 FEATHER_PX = 12           # sfuma il bordo della sostituzione, come fill_v3()
 
-PROMPT_TEMPLATE = (
-    "Remove the clothes hanger completely. Reconstruct the fabric of the "
-    "{garment} exactly as it would look without any hanger, preserving the "
-    "same color, texture, weave, folds, seams and lighting of the "
-    "surrounding fabric. Do not change anything else in the image."
-)
+PROMPT_TEMPLATE = "remove the hanger, keep everything else identical"
 NEGATIVE_PROMPT = (
     "hanger, hook, different color, different texture, new garment, "
     "cartoon, illustration, blurry, distorted seams"
@@ -186,7 +181,7 @@ def rimuovi_gruccia(original_bgr, mask_gray, quant="Q5_K_M", steps=30,
     log(f"Crop di contesto: {crop_bgr.shape[1]}x{crop_bgr.shape[0]}px (box={box})")
 
     pipe = carica_pipeline(quant)
-    prompt = PROMPT_TEMPLATE.format(garment=garment)
+    prompt = PROMPT_TEMPLATE
     log(f"Prompt: {prompt}")
 
     crop_rgb_pil = Image.fromarray(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
