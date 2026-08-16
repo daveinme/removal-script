@@ -57,15 +57,20 @@ def carica_pipeline(quant: str):
         return _PIPE_CACHE[quant]
 
     import torch
+    from huggingface_hub import hf_hub_download
     from diffusers import GGUFQuantizationConfig, QwenImageTransformer2DModel, QwenImageEditPipeline
 
     gguf_file = f"qwen-image-edit-2511-{quant}.gguf"
-    gguf_url = f"https://huggingface.co/{REPO_GGUF}/resolve/main/{gguf_file}"
 
     t0 = time.time()
-    log(f"Carico transformer GGUF ({quant}) da {REPO_GGUF} — download se non in cache locale HF...")
+    log(f"Risolvo transformer GGUF ({quant}) da {REPO_GGUF} — usa la cache locale HF se già scaricato...")
+    # from_single_file NON accetta un URL https diretto (lo tratta come
+    # repo_id, non come download): va risolto prima con hf_hub_download,
+    # che riusa la cache di setup_qwen.sh senza riscaricare nulla.
+    gguf_path = hf_hub_download(REPO_GGUF, gguf_file)
+    log(f"  path locale: {gguf_path} ({time.time()-t0:.1f}s)")
     transformer = QwenImageTransformer2DModel.from_single_file(
-        gguf_url,
+        gguf_path,
         quantization_config=GGUFQuantizationConfig(compute_dtype=torch.bfloat16),
         dtype=torch.bfloat16,
     )
