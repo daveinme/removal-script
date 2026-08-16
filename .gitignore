@@ -21,6 +21,9 @@ modelli/zits_repo/
 *.webp
 capi_test/
 !gui/**/*.png
+/docs
+/pareri
+/sito-review
 
 # Log
 *.log

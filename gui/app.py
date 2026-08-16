@@ -13,23 +13,22 @@ gia' prodotti): qui si sceglie l'immagine, si regolano i parametri, si lancia
 e si confronta prima/dopo affiancati.
 """
 import base64
-import io
 import json
 import os
 import sys
 import threading
 import time
 from pathlib import Path
+from typing import Literal
 
 import cv2
 import numpy as np
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uvicorn
 
 ROOT = Path(__file__).parent.parent
-SCOUT = ROOT.parent
 sys.path.insert(0, str(ROOT))
 # src/ contiene scout_warp, il modulo di raddrizzamento: e' autonomo (non
 # importa nulla della GUI) proprio perche' lo stesso codice andra' usato da
@@ -48,6 +47,10 @@ app = FastAPI(title="Controllo rimozione gruccia")
 # mentre l'elaborazione gira, invece di restare bloccata sulla richiesta.
 JOB = {"running": False, "log": [], "result": None, "error": None}
 _lock = threading.Lock()
+
+# PNG a piena risoluzione dell'ultimo risultato: tenuto fuori da JOB["result"]
+# cosi' /api/status resta leggero anche in polling continuo durante il job.
+DOWNLOAD = {"png": None, "name": None}
 
 # Sessione di lavoro iterativo su un capo: si parte dall'immagine originale e
 # a ogni passata si accumula il risultato, cosi' la successiva lavora su un
@@ -90,6 +93,41 @@ def to_data_uri(img_bgr, max_side=1400, quality=82):
     return "data:image/jpeg;base64," + base64.b64encode(buf).decode()
 
 
+def banner_parametri(img_bgr, rec):
+    """Disegna in alto una fascia con i parametri della passata (dilatazione,
+    alpha, ombre...): serve per confrontare a colpo d'occhio piu' salvataggi
+    fatti cambiando un solo parametro alla volta, senza dover riaprire il
+    registro sessioni.jsonl per ricordare cosa si era usato."""
+    from PIL import Image as PILImage, ImageDraw, ImageFont
+
+    campi = [
+        ("engine", "motore"), ("dilate_px", "dilate"), ("use_alpha", "alpha"),
+        ("catch_shadows", "ombre"), ("shadow_strength", "soglia_ombra"),
+        ("conf", "conf"),
+    ]
+    parti = [f"{etichetta}={rec.get(chiave)}" for chiave, etichetta in campi
+             if rec.get(chiave) is not None]
+    testo = "  |  ".join(parti)
+
+    h, w = img_bgr.shape[:2]
+    banner_h = max(50, h // 28)
+    canvas = np.full((h + banner_h, w, 3), 255, dtype=np.uint8)
+    canvas[banner_h:, :] = img_bgr
+
+    pil_img = PILImage.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_img)
+    try:
+        font = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+            size=max(14, banner_h // 3))
+    except OSError:
+        font = ImageFont.load_default()
+    draw.rectangle([0, 0, w, banner_h], fill=(20, 20, 20))
+    draw.text((14, banner_h // 4), testo, fill=(255, 255, 255), font=font)
+
+    return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
+
 # ---------------------------------------------------------------- detection
 
 def free_vram(*objs):
@@ -115,6 +153,10 @@ def detect_sam3(rgb, prompts, conf):
     """SAM 3 con prompt testuale. Ritorna maschera uint8 o None se non
     disponibile/non trova nulla."""
     from ultralytics.models.sam import SAM3SemanticPredictor
+
+    # se un motore di fill precedente (ZITS/PowerPaint) e' rimasto in VRAM,
+    # SAM3 (~9 GB) puo' andare in OOM: si libera prima di caricarlo.
+    free_vram()
 
     ckpt = ROOT / "modelli" / "sam3" / "sam3.pt"
     if not ckpt.exists() or ckpt.stat().st_size < 1_000_000:
@@ -142,48 +184,6 @@ def detect_sam3(rgb, prompts, conf):
     return comb, confs
 
 
-def detect_dino_sam2(rgb, prompt_str, box_thr=0.25, text_thr=0.20):
-    """Pipeline storica: GroundingDINO produce le box, SAM2 le segmenta.
-    Serve come termine di paragone contro SAM 3."""
-    import torch
-    from groundingdino.util.inference import load_model, predict
-    import groundingdino.datasets.transforms as T
-    from PIL import Image as PILImage
-
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
-    cfg = ROOT / "venv/lib/python3.10/site-packages/groundingdino/config/GroundingDINO_SwinT_OGC.py"
-    wts = ROOT / "modelli/groundingdino/groundingdino_swint_ogc.pth"
-    model = load_model(str(cfg), str(wts)).to(dev)
-
-    src = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
-    tf = T.Compose([T.RandomResize([800], max_size=1333), T.ToTensor(),
-                    T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
-    timg, _ = tf(PILImage.fromarray(src), None)
-    boxes, logits, phrases = predict(model=model, image=timg, caption=prompt_str,
-                                     box_threshold=box_thr, text_threshold=text_thr, device=dev)
-    # scarta box enormi: falsi positivi che coprono mezza immagine
-    keep = [i for i in range(len(boxes)) if float(boxes[i, 2] * boxes[i, 3]) <= 0.25]
-    boxes = boxes[keep]
-    if len(boxes) == 0:
-        return None, []
-    h, w = rgb.shape[:2]
-    xyxy = boxes.clone()
-    xyxy[:, 0] = (boxes[:, 0] - boxes[:, 2] / 2) * w
-    xyxy[:, 1] = (boxes[:, 1] - boxes[:, 3] / 2) * h
-    xyxy[:, 2] = (boxes[:, 0] + boxes[:, 2] / 2) * w
-    xyxy[:, 3] = (boxes[:, 1] + boxes[:, 3] / 2) * h
-
-    from sam2.build_sam import build_sam2
-    from sam2.sam2_image_predictor import SAM2ImagePredictor
-    sam = build_sam2("configs/sam2.1/sam2.1_hiera_l.yaml",
-                     str(ROOT / "modelli/sam2/sam2.1_hiera_large.pt"), device=dev)
-    p = SAM2ImagePredictor(sam)
-    p.set_image(src)
-    masks, _, _ = p.predict(box=xyxy.numpy(), multimask_output=False)
-    comb = np.zeros((h, w), np.uint8)
-    for m in masks:
-        comb |= (( m.squeeze() if m.ndim > 2 else m) > 0.5).astype(np.uint8) * 255
-    return comb, [str(x) for x in phrases]
 
 
 # ------------------------------------------------------------------- fill
@@ -275,7 +275,7 @@ def clean_isolated(rgb, alpha, max_frac=0.01):
     return out, removed, sorted(sizes, reverse=True)[:6]
 
 
-def patch_fill(rgb, md, search_px=None, patch_margin=40):
+def patch_fill(rgb, md, search_px=None, patch_margin=40, min_tessuto=0.97):
     """Texture patching: riempie il buco copiando il pattern VERO dallo stesso
     capo, invece di farlo inventare a un modello.
 
@@ -284,6 +284,14 @@ def patch_fill(rgb, md, search_px=None, patch_margin=40):
     cv2.seamlessClone (Poisson blending), che raccorda luminosita' e colore
     ai bordi. Il pattern risultante e' quello reale del capo — nessuna
     invenzione, che e' il limite di tutti i generativi provati.
+
+    `min_tessuto`: frazione minima di pixel non-bianchi che una finestra
+    sorgente deve avere per essere accettata. Vicino a un bordo curvo o
+    stretto (es. un colletto), NESSUNA traslazione della stessa forma puo'
+    restare interamente dentro il tessuto: con la soglia di default (0.97)
+    la ricerca fallisce sempre e la componente resta intatta, senza fill e
+    senza errore — va abbassata per quei casi (rischio: puo' clonare un
+    po' di sfondo/bordo dentro la maschera).
 
     Ritorna l'immagine e il numero di patch applicate.
     """
@@ -326,7 +334,7 @@ def patch_fill(rgb, md, search_px=None, patch_margin=40):
                     continue  # la sorgente non deve contenere altra maschera
                 win = rgb[sy0:sy0 + bh, sx0:sx0 + bw]
                 # deve essere quasi tutto tessuto, non sfondo bianco
-                if (win.min(axis=2) < 235).mean() < 0.97:
+                if (win.min(axis=2) < 235).mean() < min_tessuto:
                     continue
                 best = (sy0, sx0)
                 break
@@ -351,15 +359,12 @@ def patch_fill(rgb, md, search_px=None, patch_margin=40):
 
 _IOPAINT = {}
 
-# Motori di rimozione forniti da IOPaint. Sono tutti "erase" (addestrati a
-# cancellare, non a generare) e girano sulla 3060.
+# Motori di rimozione forniti da IOPaint. Ridotto ai soli motori con
+# possibilita' reale di restare in uso (vedi consulto in pareri/): gli altri
+# (MAT, MIGAN, FcF, ZITS-iopaint, LDM, LaMa-iopaint) erano solo termini di
+# paragone, mai indicati come promettenti, rimossi per non appesantire la
+# selezione motore.
 IOPAINT_ENGINES = {
-    "iop_lama":  "lama",    # stessa rete del nostro LaMa, ma con tiling IOPaint
-    "iop_mat":   "mat",     # Mask-Aware Transformer, per buchi grandi
-    "iop_migan": "migan",   # leggero e veloce
-    "iop_fcf":   "fcf",     # Fourier CNN, buono sulle strutture
-    "iop_zits":  "zits",    # struttura + texture (versione mantenuta)
-    "iop_ldm":   "ldm",     # latent diffusion, piu' lento
     # PowerPaint e' l'unico addestrato SPECIFICAMENTE per l'object removal:
     # ha un task dedicato ("object-remove") invece di un prompt generico.
     # E' un diffusion, ma guidato a cancellare e non a generare — quindi in
@@ -451,12 +456,16 @@ def inpaint_iopaint(rgb, md, engine_key, steps=30):
         # risoluzione piu' bassa e si ricampiona. Su 24 GB si puo' alzare.
         log(f"  diffusion a {limit}px (GPU {total_gb:.0f} GB); il resto del "
             f"capo resta a piena risoluzione")
+        # seed fisso (non -1/random): le passate vanno nel registro
+        # sessioni.jsonl per capire dove l'automatico sbaglia, un seed
+        # casuale renderebbe lo stesso input non riproducibile tra due run.
+        sd_seed = 12345
         kw.update(
             prompt="", negative_prompt="",
             powerpaint_task=PowerPaintTask.object_remove,  # cancella, non genera
-            sd_steps=steps, sd_guidance_scale=7.5, sd_seed=-1,
+            sd_steps=steps, sd_guidance_scale=7.5, sd_seed=sd_seed,
         )
-        log(f"  PowerPaint: task object-remove, {steps} passi")
+        log(f"  PowerPaint: task object-remove, {steps} passi, seed {sd_seed}")
     req = InpaintRequest(**kw)
     work_rgb, work_md = rgb, md
     if engine_key == "iop_powerpaint":
@@ -499,6 +508,21 @@ def inpaint_iopaint(rgb, md, engine_key, steps=30):
     sel = md > 0
     out[sel] = res[sel]                        # fuori maschera resta l'originale
     return out
+
+
+_LAMA = None
+
+
+def get_lama():
+    """LaMa e' il motore di default: viene invocato a ogni passata, quindi
+    va tenuto in cache invece di ricaricarlo da disco ogni volta (prima
+    veniva ricreato a ogni chiamata di fill_v3 — lento e affidava al GC lo
+    scarico della VRAM, invece che a un unload esplicito)."""
+    global _LAMA
+    if _LAMA is None:
+        from simple_lama_inpainting import SimpleLama
+        _LAMA = SimpleLama()
+    return _LAMA
 
 
 _ZITS = None
@@ -589,55 +613,7 @@ def inpaint_zits(rgb, md):
         os.chdir(cwd)
 
 
-_SD_PIPE = None
-
-
-def inpaint_sd15(crop_rgb, crop_mask, prompt=""):
-    """Inpainting generativo con Stable Diffusion 1.5 inpainting.
-
-    ATTENZIONE: a differenza di LaMa, questo modello INVENTA il contenuto.
-    Su un tessuto a fantasia produce un pattern plausibile ma DIVERSO da
-    quello reale del capo. Va usato sapendolo, e verificato caso per caso.
-
-    Lavora a 512x512 (la risoluzione nativa del modello) e poi ricampiona
-    alla dimensione del crop: quindi il dettaglio fine viene comunque perso
-    se il crop e' molto piu' grande.
-    """
-    global _SD_PIPE
-    import torch
-    from diffusers import StableDiffusionInpaintPipeline
-    from PIL import Image as PILImage
-
-    if _SD_PIPE is None:
-        _SD_PIPE = StableDiffusionInpaintPipeline.from_pretrained(
-            "botp/stable-diffusion-v1-5-inpainting",
-            torch_dtype=torch.float16,
-            safety_checker=None,
-        )
-        _SD_PIPE.set_progress_bar_config(disable=True)
-        if torch.cuda.is_available():
-            # tiene i pesi in RAM e sposta sulla GPU solo il modulo in uso:
-            # convive con SAM 3 senza saturare la VRAM
-            _SD_PIPE.enable_model_cpu_offload()
-            _SD_PIPE.enable_attention_slicing()
-        else:
-            _SD_PIPE = _SD_PIPE.to("cpu")
-
-    h, w = crop_rgb.shape[:2]
-    img = PILImage.fromarray(crop_rgb).resize((512, 512), PILImage.LANCZOS)
-    msk = PILImage.fromarray(crop_mask).resize((512, 512), PILImage.NEAREST)
-    if not prompt:
-        prompt = "seamless continuation of the surrounding fabric texture, same pattern, product photo"
-    out = _SD_PIPE(
-        prompt=prompt,
-        negative_prompt="hanger, hook, clip, distortion, blurry, artifacts, text, watermark",
-        image=img, mask_image=msk,
-        num_inference_steps=30, guidance_scale=7.5,
-    ).images[0]
-    return np.array(out.resize((w, h), PILImage.LANCZOS))
-
-
-def fill_v3(rgb, mask, dilate_px, alpha=None, use_lama=True, engine="lama", sd_prompt="", sd_steps=30):
+def fill_v3(rgb, mask, dilate_px, alpha=None, engine="lama", sd_steps=30, patch_min_tessuto=0.97):
     """Logica v3: dilatazione uniforme leggera + LaMa sul crop.
 
     v3 e' la versione che nei confronti misurati danneggiava meno il capo.
@@ -671,7 +647,7 @@ def fill_v3(rgb, mask, dilate_px, alpha=None, use_lama=True, engine="lama", sd_p
     # solo i bordi residui. Pensato per i tessuti a fantasia, dove estendere
     # la texture (LaMa) o inventarla (generativi) falliscono entrambi.
     if engine == "patch":
-        out, applied = patch_fill(rgb_out, md)
+        out, applied = patch_fill(rgb_out, md, min_tessuto=patch_min_tessuto)
         return out, md, applied
 
     if engine == "zits":
@@ -689,27 +665,32 @@ def fill_v3(rgb, mask, dilate_px, alpha=None, use_lama=True, engine="lama", sd_p
     cmask = md[y0:y1, x0:x1]
 
     from PIL import Image as PILImage
-    if engine == "sd15":
-        res = inpaint_sd15(crop, cmask, sd_prompt)
-    else:
-        from simple_lama_inpainting import SimpleLama
-        lama = SimpleLama()
-        res = np.array(lama(PILImage.fromarray(crop), PILImage.fromarray(cmask)))
+    lama = get_lama()
+    res = np.array(lama(PILImage.fromarray(crop), PILImage.fromarray(cmask)))
     if res.shape[:2] != crop.shape[:2]:
         res = cv2.resize(res, (crop.shape[1], crop.shape[0]), interpolation=cv2.INTER_LANCZOS4)
-    merged = np.where((cmask > 0)[:, :, None], res, crop)
-    rgb_out[y0:y1, x0:x1] = cv2.cvtColor(merged, cv2.COLOR_RGB2BGR)
+    res_bgr = cv2.cvtColor(res, cv2.COLOR_RGB2BGR)
+    region = rgb_out[y0:y1, x0:x1]
+    sel = cmask > 0
+    region[sel] = res_bgr[sel]        # fuori maschera: pixel del crop originale intatti
+    rgb_out[y0:y1, x0:x1] = region
     return rgb_out, md, 0
 
 
 # -------------------------------------------------------------------- job
 
+# Motori con possibilita' reale di restare in uso (vedi consulto in pareri/).
+# Gli altri (SD1.5, IOPaint MAT/MIGAN/FcF/ZITS/LDM/LaMa, GroundingDINO+SAM2)
+# sono stati tolti: mai indicati come promettenti, solo termini di paragone.
+ENGINES = Literal["lama", "iop_powerpaint", "zits", "patch", "none"]
+
+
 class RunReq(BaseModel):
     filename: str
-    detector: str = "sam3"          # "sam3" | "dino_sam2"
+    detector: Literal["sam3"] = "sam3"
     prompts: str = "clothes hanger, hook, clip"
-    conf: float = 0.25
-    dilate_px: int = 15             # default v3
+    conf: float = Field(default=0.25, ge=0.05, le=0.9)
+    dilate_px: int = Field(default=15, ge=1, le=101)  # default v3
     use_alpha: bool = True
     clean_frags: bool = True        # togli nastro adesivo / frammenti isolati
     # Lavoro iterativo: se continue_session, si parte dal risultato della
@@ -717,12 +698,21 @@ class RunReq(BaseModel):
     # a un rettangolo [x0,y0,x1,y1] in coordinate relative 0-1.
     continue_session: bool = False
     zona: list[float] | None = None
+    # Se True e c'e' una zona: la zona STESSA diventa la maschera, SAM 3 non
+    # viene interpellato. Serve per rifinire un residuo di TEXTURE (fill
+    # sbagliato della passata precedente) invece di un oggetto fisico —
+    # li' SAM 3 non trova nulla da segmentare col prompt (giustamente: non
+    # c'e' piu' ne' gancio ne' clip), quindi la passata falliva sempre.
+    zona_e_maschera: bool = False
     nota: str = ""                  # annotazione libera dell'operatore
     catch_shadows: bool = True      # estendi la maschera alle ombre della gruccia
-    shadow_strength: float = 0.82   # piu' basso = solo ombre molto marcate
-    engine: str = "lama"            # "lama" | "sd15" (generativo) | "none" (buco bianco)
-    sd_prompt: str = ""             # prompt libero per sd15; vuoto = descrizione generica
-    sd_steps: int = 30              # passi di diffusione (PowerPaint/SD): meno = piu' veloce
+    shadow_strength: float = Field(default=0.82, ge=0.5, le=0.98)
+    engine: ENGINES = "lama"
+    sd_steps: int = Field(default=30, ge=4, le=60)  # passi diffusione (PowerPaint)
+    # soglia "quanto tessuto pulito" per patch_fill: vicino a un bordo curvo
+    # o stretto va abbassata, altrimenti la ricerca fallisce sempre e la
+    # componente resta senza fill (vedi patch_fill).
+    patch_min_tessuto: float = Field(default=0.97, ge=0.5, le=0.99)
 
 
 def run_job(req: RunReq):
@@ -747,57 +737,68 @@ def run_job(req: RunReq):
             log(f"Carico {req.filename} — passata 1")
         log(f"  risoluzione {rgb.shape[1]}x{rgb.shape[0]}, alpha: {'si' if alpha is not None else 'no'}")
 
-        prompts = [p.strip() for p in req.prompts.split(",") if p.strip()]
         t0 = time.time()
-        if req.detector == "sam3":
+        H, W = rgb.shape[:2]
+        prompts = None   # nessuna detection testuale quando zona_e_maschera
+
+        if req.zona_e_maschera:
+            # Bypassa SAM 3: il rettangolo disegnato dall'operatore E' la
+            # maschera. Per rifinire un residuo di texture, non un oggetto.
+            if not req.zona or len(req.zona) != 4:
+                raise RuntimeError(
+                    "Serve una zona disegnata sul risultato per usarla come maschera.")
+            zx0, zy0, zx1, zy1 = (max(0.0, min(1.0, v)) for v in req.zona)
+            zx0, zx1 = sorted((zx0, zx1))
+            zy0, zy1 = sorted((zy0, zy1))
+            mask = np.zeros((H, W), np.uint8)
+            mask[int(zy0 * H):int(zy1 * H), int(zx0 * W):int(zx1 * W)] = 255
+            log(f"  zona usata come maschera diretta: {int((mask > 0).sum())} px, SAM 3 saltato")
+        else:
+            prompts = [p.strip() for p in req.prompts.split(",") if p.strip()]
+            if not prompts:
+                raise RuntimeError("Prompt vuoto: indica almeno una parola chiave (es. 'clothes hanger').")
             log(f"Detection SAM 3, prompt={prompts} conf={req.conf}")
             mask, info = detect_sam3(rgb, prompts, req.conf)
-        else:
-            log(f"Detection GroundingDINO + SAM2 (pipeline storica)")
-            mask, info = detect_dino_sam2(rgb, " . ".join(prompts))
-        if mask is None:
-            raise RuntimeError("Nessuna maschera trovata — prova ad abbassare conf o cambiare prompt.")
-        log(f"  maschera: {int((mask>0).sum())} px  ({time.time()-t0:.1f}s)  {info}")
+            if mask is None:
+                raise RuntimeError("Nessuna maschera trovata — prova ad abbassare conf o cambiare prompt.")
+            log(f"  maschera: {int((mask>0).sum())} px  ({time.time()-t0:.1f}s)  {info}")
 
-        # Zona ristretta: l'operatore ha selezionato un rettangolo attorno al
-        # residuo, quindi si ignora tutto cio' che SAM 3 trova fuori da li'.
-        if req.zona:
-            zx0, zy0, zx1, zy1 = req.zona
-            H, W = mask.shape
-            box = np.zeros_like(mask)
-            box[int(zy0 * H):int(zy1 * H), int(zx0 * W):int(zx1 * W)] = 255
-            before = int((mask > 0).sum())
-            mask = cv2.bitwise_and(mask, box)
-            log(f"  zona selezionata: maschera ristretta da {before} a "
-                f"{int((mask > 0).sum())} px")
-            if (mask > 0).sum() == 0:
-                raise RuntimeError(
-                    "Nessuna gruccia trovata dentro la zona selezionata — "
-                    "prova ad allargarla o ad abbassare la confidenza.")
+            # Zona ristretta: l'operatore ha selezionato un rettangolo attorno
+            # al residuo, quindi si ignora cio' che SAM 3 trova fuori da li'.
+            if req.zona:
+                if len(req.zona) != 4:
+                    raise RuntimeError("Zona non valida: servono 4 coordinate [x0,y0,x1,y1].")
+                zx0, zy0, zx1, zy1 = (max(0.0, min(1.0, v)) for v in req.zona)
+                zx0, zx1 = sorted((zx0, zx1))
+                zy0, zy1 = sorted((zy0, zy1))
+                box = np.zeros_like(mask)
+                box[int(zy0 * H):int(zy1 * H), int(zx0 * W):int(zx1 * W)] = 255
+                before = int((mask > 0).sum())
+                mask = cv2.bitwise_and(mask, box)
+                log(f"  zona selezionata: maschera ristretta da {before} a "
+                    f"{int((mask > 0).sum())} px")
+                if (mask > 0).sum() == 0:
+                    raise RuntimeError(
+                        "Nessuna gruccia trovata dentro la zona selezionata — "
+                        "prova ad allargarla o ad abbassare la confidenza.")
 
-        if req.catch_shadows:
+        if req.catch_shadows and not req.zona_e_maschera:
             mask, nsh = add_shadows(rgb, mask, strength=req.shadow_strength)
             log(f"Ombre della gruccia sul tessuto: +{nsh} px aggiunti alla maschera")
 
-        names = {"lama": "LaMa", "sd15": "SD 1.5 generativo",
-                 "patch": "Texture patching (clona il pattern del capo)",
-                 "zits": "ZITS (struttura + texture)",
-                 "none": "nessun fill (buco bianco)",
-                 "iop_lama": "LaMa via IOPaint", "iop_mat": "MAT via IOPaint",
-                 "iop_migan": "MIGAN via IOPaint", "iop_fcf": "FcF via IOPaint",
-                 "iop_zits": "ZITS via IOPaint", "iop_ldm": "LDM via IOPaint",
+        names = {"lama": "LaMa", "patch": "Texture patching (clona il pattern del capo)",
+                 "zits": "ZITS (struttura + texture)", "none": "nessun fill (buco bianco)",
                  "iop_powerpaint": "PowerPaint (task object-remove)"}
-        log(f"Fill: {names.get(req.engine, req.engine)} — dilate {req.dilate_px}px, "
+        dilate_px = req.dilate_px | 1   # kernel dispari: centratura simmetrica
+        log(f"Fill: {names.get(req.engine, req.engine)} — dilate {dilate_px}px, "
             f"alpha={'si' if req.use_alpha and alpha is not None else 'no'}")
-        if req.engine == "sd15":
-            log("  NB: il generativo INVENTA il contenuto — su una fantasia il")
-            log("      pattern sara' plausibile ma diverso da quello reale.")
         t1 = time.time()
-        out, md, npatch = fill_v3(rgb, mask, req.dilate_px, alpha if req.use_alpha else None,
-                          engine=req.engine, sd_prompt=req.sd_prompt, sd_steps=req.sd_steps)
+        out, md, npatch = fill_v3(rgb, mask, dilate_px, alpha if req.use_alpha else None,
+                          engine=req.engine, sd_steps=req.sd_steps,
+                          patch_min_tessuto=req.patch_min_tessuto)
         log(f"  completato in {time.time()-t1:.1f}s")
         if req.engine == "patch":
-            log(f"  patch di tessuto clonate dal capo: {npatch}")
+            log(f"  patch di tessuto clonate dal capo: {npatch} (soglia tessuto {req.patch_min_tessuto})")
         elif req.engine == "zits":
             log(f"  elaborato su crop quadrato {npatch}x{npatch} px")
 
@@ -813,11 +814,14 @@ def run_job(req: RunReq):
             else:
                 log("Nessun frammento isolato da rimuovere")
 
-        # Niente scrittura su disco: il risultato torna alla pagina, che offre
-        # il download a piena risoluzione se serve conservarlo.
+        # Niente scrittura su disco: il PNG pieno resta in memoria server-side
+        # e viene servito da /api/download solo su richiesta esplicita —
+        # prima finiva dentro /api/status, scaricato per intero a ogni poll.
         stem = Path(req.filename).stem
         ok, buf = cv2.imencode(".png", out)
-        full_png = "data:image/png;base64," + base64.b64encode(buf).decode() if ok else None
+        full_png_bytes = buf.tobytes() if ok else None
+        DOWNLOAD["png"] = full_png_bytes
+        DOWNLOAD["name"] = f"{stem}_pulita.png"
 
         ov = rgb.copy()
         ov[md > 0] = (0, 0, 255)
@@ -828,7 +832,7 @@ def run_job(req: RunReq):
         # danno collaterale sul capo, che e' cio' che si nota a occhio.
         # Esclude anche l'area fuori-soggetto (dove l'alpha dice sfondo): li'
         # ogni modifica e' voluta (nastro, frammenti), non danno al capo.
-        diff = (np.abs(out.astype(int) - rgb.astype(int)).max(axis=2) > 18)
+        diff = cv2.absdiff(out, rgb).max(axis=2) > 18
         outside = (alpha < 128) if alpha is not None else np.zeros(diff.shape, bool)
         collateral = int((diff & (md == 0) & ~outside & ~frag_mask).sum())
 
@@ -839,8 +843,8 @@ def run_job(req: RunReq):
                 "overlay": to_data_uri(ov),
                 "mask_px": int((md > 0).sum()),
                 "collateral_px": collateral,
-                "download": full_png,
-                "download_name": f"{stem}_pulita.png",
+                "has_download": full_png_bytes is not None,
+                "download_name": DOWNLOAD["name"],
                 "pass_n": n_pass,
             }
         log(f"px capo alterati fuori maschera: {collateral}  (piu' basso = meglio)")
@@ -851,9 +855,11 @@ def run_job(req: RunReq):
         rec = {
             "capo": req.filename, "passata": n_pass,
             "detector": req.detector, "engine": req.engine,
-            "prompt": prompts, "conf": req.conf, "dilate_px": req.dilate_px,
+            "prompt": prompts, "conf": req.conf, "dilate_px": dilate_px,
             "zona": req.zona, "nota": req.nota,
+            "use_alpha": req.use_alpha,
             "catch_shadows": req.catch_shadows,
+            "shadow_strength": req.shadow_strength if req.catch_shadows else None,
             "mask_px": int((md > 0).sum()), "collateral_px": collateral,
             "secondi": round(time.time() - t0, 1),
         }
@@ -1078,7 +1084,9 @@ async def api_warp_applica(req: WarpReq):
 @app.post("/api/reset")
 async def api_reset():
     """Svuota le immagini in memoria: la pagina lo chiama a ogni caricamento,
-    così un refresh riparte sempre da zero."""
+    così un refresh riparte sempre da zero — inclusa la sessione iterativa,
+    altrimenti una nuova immagine con lo stesso nome di una vecchia poteva
+    ripartire dal risultato della sessione precedente."""
     with _lock:
         if JOB["running"]:
             # un refresh durante l'elaborazione non deve buttare via
@@ -1086,6 +1094,8 @@ async def api_reset():
             return {"cleared": 0, "skipped": "elaborazione in corso"}
     n = len(UPLOADS)
     UPLOADS.clear()
+    SESSION.update({"filename": None, "current": None, "passes": []})
+    DOWNLOAD.update({"png": None, "name": None})
     with _lock:
         JOB.update({"running": False, "log": [], "result": None, "error": None})
     return {"cleared": n}
@@ -1105,6 +1115,49 @@ async def api_run(req: RunReq):
 async def api_status():
     with _lock:
         return dict(JOB)
+
+
+CONFRONTI_DIR = ROOT / "output" / "confronti"
+
+
+@app.post("/api/salva_confronto")
+async def api_salva_confronto():
+    """Salva su disco l'ultimo risultato con un banner che riporta i
+    parametri usati (dilatazione, alpha, ombre...) stampato sull'immagine:
+    pensato per confrontare piu' salvataggi fatti cambiando un solo
+    parametro alla volta (es. use_alpha ON/OFF) senza doverli etichettare
+    a mano o tenere a mente quale era quale."""
+    if DOWNLOAD["png"] is None:
+        return JSONResponse({"error": "Nessun risultato disponibile"}, status_code=404)
+    if not SESSION["passes"]:
+        return JSONResponse({"error": "Nessuna passata registrata per questo risultato"}, status_code=404)
+
+    rec = SESSION["passes"][-1]
+    img = cv2.imdecode(np.frombuffer(DOWNLOAD["png"], np.uint8), cv2.IMREAD_COLOR)
+    etichettata = banner_parametri(img, rec)
+
+    CONFRONTI_DIR.mkdir(parents=True, exist_ok=True)
+    stem = Path(rec.get("capo", "capo")).stem
+    quando = rec.get("quando", "").replace(":", "-")
+    nome = f"{stem}_p{rec.get('passata', 1)}_{quando}.png"
+    out_path = CONFRONTI_DIR / nome
+    cv2.imwrite(str(out_path), etichettata)
+
+    return {"salvato": str(out_path.relative_to(ROOT))}
+
+
+@app.get("/api/download")
+async def api_download():
+    """PNG a piena risoluzione dell'ultimo risultato, servito solo su
+    richiesta esplicita (bottone Scarica) — non piu' incluso nel polling
+    di /api/status, che restava pesante anche a job concluso."""
+    if DOWNLOAD["png"] is None:
+        return JSONResponse({"error": "Nessun risultato disponibile"}, status_code=404)
+    from fastapi.responses import Response
+    return Response(
+        content=DOWNLOAD["png"], media_type="image/png",
+        headers={"Content-Disposition": f'attachment; filename="{DOWNLOAD["name"]}"'},
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
