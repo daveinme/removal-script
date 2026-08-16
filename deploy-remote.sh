@@ -8,10 +8,12 @@
 # la si raggiunge dal proprio browser tramite tunnel SSH.
 #
 # Uso:
-#   ./deploy-remote.sh sync    utente@host -p PORTA   copia codice + capi di test
-#   ./deploy-remote.sh setup   utente@host -p PORTA   crea il venv e installa
-#   ./deploy-remote.sh tunnel  utente@host -p PORTA   apre il tunnel sulla GUI
-#   ./deploy-remote.sh pull    utente@host -p PORTA   riporta indietro i risultati
+#   ./deploy-remote.sh sync        utente@host -p PORTA   copia codice + capi di test
+#   ./deploy-remote.sh setup       utente@host -p PORTA   crea il venv e installa
+#   ./deploy-remote.sh qwen-setup  utente@host -p PORTA   ambiente Qwen GGUF (venv-qwen)
+#   ./deploy-remote.sh tunnel      utente@host -p PORTA   apre il tunnel SSH sulla GUI
+#   ./deploy-remote.sh cf-tunnel   utente@host -p PORTA   GUI + tunnel Cloudflare pubblico
+#   ./deploy-remote.sh pull        utente@host -p PORTA   riporta indietro i risultati
 set -euo pipefail
 
 CMD="${1:-}"; shift || true
@@ -81,12 +83,58 @@ REMOTE
   echo "Ora:  ./deploy-remote.sh tunnel $HOST ${SSH_OPTS[*]}"
   ;;
 
+qwen-setup)
+  echo "==> Preparo l'ambiente Qwen Image Edit GGUF su $HOST (venv separato)"
+  echo "    Tempi/dimensioni reali stampati in diretta dallo script remoto."
+  ssh "${SSH_OPTS[@]}" "$HOST" "cd $REMOTE_DIR && bash setup_qwen.sh ${1:-Q5_K_M}"
+  ;;
+
 tunnel)
   echo "==> Avvio la GUI su $HOST e apro il tunnel"
   echo "    Apri nel browser:  http://localhost:8095"
   echo "    (Ctrl+C per chiudere)"
   ssh "${SSH_OPTS[@]}" -L 8095:localhost:8095 "$HOST" \
     "cd ~/scout-gruccia && ./venv/bin/python gui/app.py"
+  ;;
+
+cf-tunnel)
+  echo "==> Avvio la GUI su $HOST e apro un tunnel Cloudflare pubblico"
+  echo "    Non serve tenere aperta la sessione SSH sul link, ma serve"
+  echo "    comunque questa sessione per vedere l'URL e i log."
+  echo "    (Ctrl+C chiude sia GUI che tunnel sull'istanza)"
+  ssh "${SSH_OPTS[@]}" "$HOST" bash -s <<'REMOTE'
+set -e
+cd ~/scout-gruccia
+
+if ! command -v cloudflared >/dev/null 2>&1; then
+  echo "==> Installo cloudflared (una tantum)"
+  ARCH=$(uname -m)
+  case "$ARCH" in
+    x86_64)  CF_BIN="cloudflared-linux-amd64" ;;
+    aarch64) CF_BIN="cloudflared-linux-arm64" ;;
+    *) echo "Architettura non gestita: $ARCH"; exit 1 ;;
+  esac
+  curl -fsSL -o /tmp/cloudflared \
+    "https://github.com/cloudflare/cloudflared/releases/latest/download/$CF_BIN"
+  chmod +x /tmp/cloudflared
+  mkdir -p ~/.local/bin
+  mv /tmp/cloudflared ~/.local/bin/cloudflared
+  export PATH="$HOME/.local/bin:$PATH"
+fi
+
+# Avvia la GUI in background, poi il tunnel in foreground: se il tunnel
+# muore (Ctrl+C, drop rete) la GUI viene comunque chiusa dal trap.
+./venv/bin/python gui/app.py > /tmp/gui.log 2>&1 &
+GUI_PID=$!
+trap "kill $GUI_PID 2>/dev/null" EXIT
+
+sleep 2
+if ! kill -0 $GUI_PID 2>/dev/null; then
+  echo "ERRORE: la GUI non e' partita, log:"; cat /tmp/gui.log; exit 1
+fi
+echo "==> GUI avviata (pid $GUI_PID), apro il tunnel Cloudflare..."
+~/.local/bin/cloudflared tunnel --url http://localhost:8095
+REMOTE
   ;;
 
 pull)
