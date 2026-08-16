@@ -44,9 +44,13 @@ CONTEXT_MARGIN_PX = 220
 EDIT_MASK_DILATE_PX = 8   # poco: la mask deve restare stretta sulla gruccia
 FEATHER_PX = 12           # sfuma il bordo della sostituzione, come fill_v3()
 
-PROMPT_TEMPLATE = "remove the hanger, keep everything else identical"
+# Pensato per la SECONDA passata: l'oggetto fisico (gruccia) e' gia' stato
+# tolto da un primo fill (LaMa/patch), qui resta solo un residuo di
+# texture/sfocatura da rifinire. Non e' piu' un compito di "rimuovi
+# l'oggetto" ma di "continua il tessuto" — prompt diverso apposta.
+PROMPT_TEMPLATE = "seamlessly continue the knit fabric pattern, no object, natural fold and lighting"
 NEGATIVE_PROMPT = (
-    "hanger, hook, different color, different texture, new garment, "
+    "hanger, hook, object, different color, different texture, new garment, "
     "cartoon, illustration, blurry, distorted seams"
 )
 
