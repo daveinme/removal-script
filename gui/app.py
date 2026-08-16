@@ -374,6 +374,53 @@ IOPAINT_ENGINES = {
 }
 
 
+def inpaint_qwen(rgb, md, steps=30, quant="Q5_K_M", garment="felpa"):
+    """Qwen Image Edit (GGUF), motore esplorativo per le occlusioni grandi
+    su zone semantiche (colletto, spalle) dove LaMa appiattisce.
+
+    Gira in venv-qwen, non nel venv della GUI: diffusers/transformers li'
+    dentro sono troppo vecchi (vincolati da IOPaint) per QwenImageTransformer
+    2DModel e GGUFQuantizationConfig. Si lancia quindi come subprocess con
+    l'interprete di venv-qwen, passando originale+maschera come file
+    temporanei — stesso principio di isolamento gia' usato per ZITS (repo
+    clonato a parte) e previsto per FLUX.2 Klein (vedi requirements-remote.txt).
+    """
+    import subprocess
+    import tempfile
+
+    venv_python = ROOT / "venv-qwen" / "bin" / "python"
+    if not venv_python.exists():
+        raise RuntimeError(
+            "venv-qwen non trovato — esegui prima 'bash setup_qwen.sh' "
+            "sull'istanza (vedi QWEN_GGUF_SETUP.md)."
+        )
+    engine_script = ROOT / "src" / "qwen_engine.py"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        in_path = tmp / "originale.png"
+        mask_path = tmp / "mask.png"
+        out_path = tmp / "risultato.png"
+        cv2.imwrite(str(in_path), rgb)
+        cv2.imwrite(str(mask_path), md)
+
+        cmd = [str(venv_python), str(engine_script), str(in_path), str(mask_path),
+               str(out_path), "--quant", quant, "--steps", str(steps), "--garment", garment]
+        log(f"  Qwen (subprocess venv-qwen): quant={quant} steps={steps}")
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        for line in proc.stdout.splitlines():
+            log(f"  [qwen] {line}")
+        if proc.returncode != 0:
+            for line in proc.stderr.splitlines()[-20:]:
+                log(f"  [qwen:err] {line}")
+            raise RuntimeError(f"Qwen ha fallito (exit {proc.returncode}) — vedi log sopra")
+
+        res = cv2.imread(str(out_path))
+        if res is None:
+            raise RuntimeError("Qwen non ha prodotto un file di output leggibile")
+        return res
+
+
 def inpaint_iopaint(rgb, md, engine_key, steps=30):
     """Inpainting tramite IOPaint, che integra e mantiene diversi modelli di
     rimozione con una sola interfaccia. Gestisce da solo il tiling per
@@ -657,6 +704,9 @@ def fill_v3(rgb, mask, dilate_px, alpha=None, engine="lama", sd_steps=30, patch_
     if engine in IOPAINT_ENGINES:
         return inpaint_iopaint(rgb_out, md, engine, sd_steps), md, 0
 
+    if engine == "qwen":
+        return inpaint_qwen(rgb_out, md, steps=sd_steps), md, 0
+
     ys, xs = np.where(md > 0)
     margin = 250
     y0, y1 = max(0, ys.min() - margin), min(rgb.shape[0], ys.max() + margin)
@@ -682,7 +732,9 @@ def fill_v3(rgb, mask, dilate_px, alpha=None, engine="lama", sd_steps=30, patch_
 # Motori con possibilita' reale di restare in uso (vedi consulto in pareri/).
 # Gli altri (SD1.5, IOPaint MAT/MIGAN/FcF/ZITS/LDM/LaMa, GroundingDINO+SAM2)
 # sono stati tolti: mai indicati come promettenti, solo termini di paragone.
-ENGINES = Literal["lama", "iop_powerpaint", "zits", "patch", "none"]
+# "qwen": test esplorativo (Qwen Image Edit GGUF), gira in venv-qwen via
+# subprocess — vedi inpaint_qwen() e QWEN_GGUF_SETUP.md.
+ENGINES = Literal["lama", "iop_powerpaint", "zits", "patch", "none", "qwen"]
 
 
 class RunReq(BaseModel):
@@ -788,7 +840,8 @@ def run_job(req: RunReq):
 
         names = {"lama": "LaMa", "patch": "Texture patching (clona il pattern del capo)",
                  "zits": "ZITS (struttura + texture)", "none": "nessun fill (buco bianco)",
-                 "iop_powerpaint": "PowerPaint (task object-remove)"}
+                 "iop_powerpaint": "PowerPaint (task object-remove)",
+                 "qwen": "Qwen Image Edit (GGUF, esplorativo)"}
         dilate_px = req.dilate_px | 1   # kernel dispari: centratura simmetrica
         log(f"Fill: {names.get(req.engine, req.engine)} — dilate {dilate_px}px, "
             f"alpha={'si' if req.use_alpha and alpha is not None else 'no'}")
