@@ -404,8 +404,10 @@ def inpaint_qwen(rgb, md, steps=30, quant="Q5_K_M", garment="felpa"):
         cv2.imwrite(str(in_path), rgb)
         cv2.imwrite(str(mask_path), md)
 
+        debug_dir = ROOT / "output" / "qwen_debug"
         cmd = [str(venv_python), str(engine_script), str(in_path), str(mask_path),
-               str(out_path), "--quant", quant, "--steps", str(steps), "--garment", garment]
+               str(out_path), "--quant", quant, "--steps", str(steps), "--garment", garment,
+               "--debug-dir", str(debug_dir)]
         log(f"  Qwen (subprocess venv-qwen): quant={quant} steps={steps}")
         env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         # encoding esplicito: la barra di progresso di huggingface_hub/tqdm
@@ -424,6 +426,7 @@ def inpaint_qwen(rgb, md, steps=30, quant="Q5_K_M", garment="felpa"):
         res = cv2.imread(str(out_path))
         if res is None:
             raise RuntimeError("Qwen non ha prodotto un file di output leggibile")
+        log(f"  Debug Qwen (crop input/mask/output grezzo): {debug_dir}")
         return res
 
 

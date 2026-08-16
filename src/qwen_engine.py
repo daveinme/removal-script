@@ -28,6 +28,7 @@ Uso diretto da riga di comando (dentro venv-qwen):
 import argparse
 import sys
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -161,7 +162,8 @@ def componi(original_bgr, generated_rgb_crop, edit_mask_crop, box):
 
 
 def rimuovi_gruccia(original_bgr, mask_gray, quant="Q5_K_M", steps=30,
-                     garment="felpa", margin_px=CONTEXT_MARGIN_PX, strength=1.0):
+                     garment="felpa", margin_px=CONTEXT_MARGIN_PX, strength=1.0,
+                     debug_dir=None):
     """Entry point richiamabile: originale BGR (np.ndarray) + maschera gray
     -> immagine BGR risultato, compositata solo dentro la maschera.
 
@@ -169,6 +171,10 @@ def rimuovi_gruccia(original_bgr, mask_gray, quant="Q5_K_M", steps=30,
     originale (a differenza dell'img2img classico, dove strength<1 lascia
     trasparire il contenuto di partenza — qui e' un oggetto da rimuovere,
     non da "correggere leggermente").
+
+    debug_dir: se dato, salva crop/mask date in input al modello e l'output
+    grezzo pre-compositing — serve a capire se un risultato scadente viene
+    dalla generazione stessa o dal compositing successivo.
     """
     if mask_gray.shape[:2] != original_bgr.shape[:2]:
         mask_gray = cv2.resize(mask_gray, (original_bgr.shape[1], original_bgr.shape[0]),
@@ -186,6 +192,13 @@ def rimuovi_gruccia(original_bgr, mask_gray, quant="Q5_K_M", steps=30,
     crop_rgb_pil = Image.fromarray(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
     mask_pil = Image.fromarray(edit_mask_crop)
 
+    if debug_dir:
+        debug_dir = Path(debug_dir)
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(debug_dir / "01_crop_input.png"), crop_bgr)
+        cv2.imwrite(str(debug_dir / "02_mask_input.png"), edit_mask_crop)
+        log(f"  Debug: crop e mask di input salvati in {debug_dir}")
+
     t0 = time.time()
     log(f"Genero (inpaint, mask nativa) — {steps} step, strength {strength}, quant {quant}...")
     out = pipe(
@@ -197,6 +210,10 @@ def rimuovi_gruccia(original_bgr, mask_gray, quant="Q5_K_M", steps=30,
         strength=strength,
         true_cfg_scale=4.0,
     ).images[0]
+
+    if debug_dir:
+        out.save(debug_dir / "03_crop_output_raw.png")
+        log(f"  Debug: output grezzo (pre-composite) salvato in {debug_dir}")
     log(f"Generazione completata in {time.time()-t0:.1f}s")
 
     return componi(original_bgr, out, edit_mask_crop, box)
@@ -212,6 +229,8 @@ def main():
     ap.add_argument("--garment", default="felpa")
     ap.add_argument("--margin", type=int, default=CONTEXT_MARGIN_PX)
     ap.add_argument("--strength", type=float, default=1.0)
+    ap.add_argument("--debug-dir", default=None,
+                     help="salva crop/mask di input e output grezzo pre-composite")
     args = ap.parse_args()
 
     original_bgr = cv2.imread(args.originale, cv2.IMREAD_COLOR)
@@ -225,7 +244,8 @@ def main():
 
     result = rimuovi_gruccia(original_bgr, mask_gray, quant=args.quant,
                               steps=args.steps, garment=args.garment,
-                              margin_px=args.margin, strength=args.strength)
+                              margin_px=args.margin, strength=args.strength,
+                              debug_dir=args.debug_dir)
     cv2.imwrite(args.output, result)
     log(f"Salvato: {args.output}")
 
