@@ -55,6 +55,7 @@ Sette motori di fill provati su capi reali. **LaMa resta il migliore.**
 | SD 1.5 | ❌ per rimuovere | Inventa: ha prodotto una gruccia *zebrata*. ✅ per **sostituire** |
 | RMBG-2.0 | ❌ | Considera la gruccia parte del soggetto |
 | Texture patching | ❌ | Non trova mai una sorgente abbastanza grande |
+| Qwen Image Edit/Inpaint (GGUF) | ❌ | Su RTX 4090 24GB (Vast), sia edit-by-prompt sia inpaint con mask nativa: **inventa un intero indumento fantasma** sopra la zona da ricostruire, invece di continuare il tessuto. Provati prompt diversi (rimozione, ricostruzione) e strength diversi, stesso esito |
 
 ### Il pattern emerso
 

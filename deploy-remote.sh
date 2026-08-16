@@ -10,7 +10,6 @@
 # Uso:
 #   ./deploy-remote.sh sync        utente@host -p PORTA   copia codice + capi di test
 #   ./deploy-remote.sh setup       utente@host -p PORTA   crea il venv e installa
-#   ./deploy-remote.sh qwen-setup  utente@host -p PORTA   ambiente Qwen GGUF (venv-qwen)
 #   ./deploy-remote.sh tunnel      utente@host -p PORTA   apre il tunnel SSH sulla GUI
 #   ./deploy-remote.sh cf-tunnel   utente@host -p PORTA   GUI + tunnel Cloudflare pubblico
 #   ./deploy-remote.sh pull        utente@host -p PORTA   riporta indietro i risultati
@@ -81,12 +80,6 @@ fi
 echo "Ambiente pronto."
 REMOTE
   echo "Ora:  ./deploy-remote.sh tunnel $HOST ${SSH_OPTS[*]}"
-  ;;
-
-qwen-setup)
-  echo "==> Preparo l'ambiente Qwen Image Edit GGUF su $HOST (venv separato)"
-  echo "    Tempi/dimensioni reali stampati in diretta dallo script remoto."
-  ssh "${SSH_OPTS[@]}" "$HOST" "cd $REMOTE_DIR && bash setup_qwen.sh ${1:-Q5_K_M}"
   ;;
 
 tunnel)
