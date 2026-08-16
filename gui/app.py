@@ -375,7 +375,7 @@ IOPAINT_ENGINES = {
 
 
 def inpaint_qwen(rgb, md, steps=30, quant="Q5_K_M", garment="felpa"):
-    """Qwen Image Edit (GGUF), motore esplorativo per le occlusioni grandi
+    """Qwen Image Inpaint (GGUF), motore esplorativo per le occlusioni grandi
     su zone semantiche (colletto, spalle) dove LaMa appiattisce.
 
     Gira in venv-qwen, non nel venv della GUI: diffusers/transformers li'
@@ -738,7 +738,7 @@ def fill_v3(rgb, mask, dilate_px, alpha=None, engine="lama", sd_steps=30, patch_
 # Motori con possibilita' reale di restare in uso (vedi consulto in pareri/).
 # Gli altri (SD1.5, IOPaint MAT/MIGAN/FcF/ZITS/LDM/LaMa, GroundingDINO+SAM2)
 # sono stati tolti: mai indicati come promettenti, solo termini di paragone.
-# "qwen": test esplorativo (Qwen Image Edit GGUF), gira in venv-qwen via
+# "qwen": test esplorativo (Qwen Image Inpaint GGUF), gira in venv-qwen via
 # subprocess — vedi inpaint_qwen() e QWEN_GGUF_SETUP.md.
 ENGINES = Literal["lama", "iop_powerpaint", "zits", "patch", "none", "qwen"]
 
@@ -847,7 +847,7 @@ def run_job(req: RunReq):
         names = {"lama": "LaMa", "patch": "Texture patching (clona il pattern del capo)",
                  "zits": "ZITS (struttura + texture)", "none": "nessun fill (buco bianco)",
                  "iop_powerpaint": "PowerPaint (task object-remove)",
-                 "qwen": "Qwen Image Edit (GGUF, esplorativo)"}
+                 "qwen": "Qwen Image Inpaint (GGUF, esplorativo)"}
         dilate_px = req.dilate_px | 1   # kernel dispari: centratura simmetrica
         log(f"Fill: {names.get(req.engine, req.engine)} — dilate {dilate_px}px, "
             f"alpha={'si' if req.use_alpha and alpha is not None else 'no'}")

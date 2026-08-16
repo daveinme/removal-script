@@ -1,10 +1,10 @@
-# Test esplorativo: Qwen Image Edit (GGUF) su VPS Vast.ai
+# Test esplorativo: Qwen Image Inpaint (GGUF) su VPS Vast.ai
 
 Non fa parte della pipeline di produzione (LaMa/PowerPaint/patch_fill, vedi
-README.md). È un test per capire se Qwen Image Edit, usato con un crop di
-contesto stretto e compositing manuale, ricostruisce meglio di LaMa le zone
-semantiche grandi (colletto, spalle) dove oggi il fill appiattisce il
-tessuto.
+README.md). È un test per capire se Qwen, usato con mask nativa
+(`QwenImageInpaintPipeline`) su un crop di contesto stretto, ricostruisce
+meglio di LaMa le zone semantiche grandi (colletto, spalle) dove oggi il
+fill appiattisce il tessuto.
 
 Gira in un **venv separato** (`venv-qwen`) dal resto del progetto, perché
 richiede `diffusers`/`transformers` molto più recenti di quelli usati da
@@ -213,21 +213,31 @@ GB** bastano stretti.
 
 ---
 
-## Nota tecnica: perché il crop e non l'immagine intera
+## Nota tecnica: perché QwenImageInpaintPipeline e non QwenImageEditPipeline
 
-`QwenImageEditPipeline` (diffusers) è **edit-by-prompt sull'intera
+Primo tentativo: `QwenImageEditPipeline`, che è **edit-by-prompt sull'intera
 immagine**, come Kontext — non esiste una mask nativa che limiti l'area
-modificata (a differenza di `QwenImageInpaintPipeline`, non testata qui).
-Per questo `qwen_test.py`:
+modificata. Risultato **inutilizzabile** sul benchmark (colletto felpa):
+senza mask nel processo di generazione, il modello vedeva l'intera gruccia
+ancora presente nel crop e produceva artefatti gravi (texture/colori
+estranei) invece di ricostruire il tessuto — il compositing a posteriori
+tagliava via solo la zona peggiore del risultato, non risolveva il
+problema di fondo.
 
-1. ritaglia un crop di contesto attorno alla mask (non l'immagine intera)
-2. genera con un prompt che descrive esplicitamente cosa ricostruire
-3. compone il risultato **solo dentro la mask dilatata**, con feathering
-   — mai `result = generated`
+Sostituita con `QwenImageInpaintPipeline`, che accetta `mask_image` nativa
+(stesso `QwenImageTransformer2DModel`/`text_encoder`/`vae`, solo pipeline
+diversa): la diffusione stessa sa quali pixel può cambiare, `strength=1.0`
+perché qui l'obiettivo è rimuovere del tutto l'oggetto nella mask, non
+correggerlo leggermente come nell'img2img classico (dove strength<1 lascia
+trasparire il contenuto di partenza).
 
-Stesso principio di compositing già usato da `fill_v3()` in `gui/app.py`
-per gli altri motori: il modello generativo propone, il compositing
-decide cosa entra davvero nel risultato finale.
+`qwen_engine.py` continua comunque a:
+
+1. ritagliare un crop di contesto attorno alla mask (più veloce, meno VRAM)
+2. passare `mask_image` reale alla pipeline
+3. compositare il risultato nel crop originale con feathering sul bordo
+   — rete di sicurezza contro piccoli drift, non più il meccanismo
+   principale di controllo dell'area modificata
 
 ## Nota tecnica: perché il text encoder va scaricato durante l'inferenza
 

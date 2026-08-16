@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 """
-Motore Qwen Image Edit (GGUF): logica condivisa tra qwen_test.py (test
+Motore Qwen Image Inpaint (GGUF): logica condivisa tra qwen_test.py (test
 esplorativo da riga di comando) e la GUI (gui/app.py, engine="qwen").
+
+Usa QwenImageInpaintPipeline (mask_image nativa), non QwenImageEditPipeline
+(edit-by-prompt sull'intera immagine, senza mask). Il primo tentativo con
+Edit + compositing manuale (crop -> genera -> sostituisci solo nella mask)
+ha prodotto artefatti gravi: senza mask nel processo di generazione, il
+modello vede l'intera gruccia ancora presente nel crop e non capisce di
+doverla rimuovere — il compositing a posteriori taglia via solo la zona
+peggiore del risultato. Con la mask passata alla pipeline, la diffusione
+stessa sa quali pixel puo' cambiare.
 
 Vive in un venv SEPARATO (venv-qwen) perche' richiede diffusers/transformers
 piu' recenti di quelli usati da IOPaint nel venv principale della GUI — le
@@ -58,7 +67,7 @@ def carica_pipeline(quant: str):
 
     import torch
     from huggingface_hub import hf_hub_download
-    from diffusers import GGUFQuantizationConfig, QwenImageTransformer2DModel, QwenImageEditPipeline
+    from diffusers import GGUFQuantizationConfig, QwenImageTransformer2DModel, QwenImageInpaintPipeline
 
     gguf_file = f"qwen-image-edit-2511-{quant}.gguf"
 
@@ -83,7 +92,7 @@ def carica_pipeline(quant: str):
 
     t0 = time.time()
     log(f"Carico pipeline base ({BASE_PIPELINE}) con transformer sostituito...")
-    pipe = QwenImageEditPipeline.from_pretrained(
+    pipe = QwenImageInpaintPipeline.from_pretrained(
         BASE_PIPELINE,
         transformer=transformer,
         dtype=torch.bfloat16,
@@ -152,9 +161,15 @@ def componi(original_bgr, generated_rgb_crop, edit_mask_crop, box):
 
 
 def rimuovi_gruccia(original_bgr, mask_gray, quant="Q5_K_M", steps=30,
-                     garment="felpa", margin_px=CONTEXT_MARGIN_PX):
+                     garment="felpa", margin_px=CONTEXT_MARGIN_PX, strength=1.0):
     """Entry point richiamabile: originale BGR (np.ndarray) + maschera gray
-    -> immagine BGR risultato, compositata solo dentro la maschera."""
+    -> immagine BGR risultato, compositata solo dentro la maschera.
+
+    strength=1.0: dentro la mask non deve restare NULLA della gruccia
+    originale (a differenza dell'img2img classico, dove strength<1 lascia
+    trasparire il contenuto di partenza — qui e' un oggetto da rimuovere,
+    non da "correggere leggermente").
+    """
     if mask_gray.shape[:2] != original_bgr.shape[:2]:
         mask_gray = cv2.resize(mask_gray, (original_bgr.shape[1], original_bgr.shape[0]),
                                 interpolation=cv2.INTER_NEAREST)
@@ -169,14 +184,17 @@ def rimuovi_gruccia(original_bgr, mask_gray, quant="Q5_K_M", steps=30,
     log(f"Prompt: {prompt}")
 
     crop_rgb_pil = Image.fromarray(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
+    mask_pil = Image.fromarray(edit_mask_crop)
 
     t0 = time.time()
-    log(f"Genero — {steps} step, quant {quant}...")
+    log(f"Genero (inpaint, mask nativa) — {steps} step, strength {strength}, quant {quant}...")
     out = pipe(
         image=crop_rgb_pil,
+        mask_image=mask_pil,
         prompt=prompt,
         negative_prompt=NEGATIVE_PROMPT,
         num_inference_steps=steps,
+        strength=strength,
         true_cfg_scale=4.0,
     ).images[0]
     log(f"Generazione completata in {time.time()-t0:.1f}s")
@@ -193,6 +211,7 @@ def main():
     ap.add_argument("--steps", type=int, default=30)
     ap.add_argument("--garment", default="felpa")
     ap.add_argument("--margin", type=int, default=CONTEXT_MARGIN_PX)
+    ap.add_argument("--strength", type=float, default=1.0)
     args = ap.parse_args()
 
     original_bgr = cv2.imread(args.originale, cv2.IMREAD_COLOR)
@@ -206,7 +225,7 @@ def main():
 
     result = rimuovi_gruccia(original_bgr, mask_gray, quant=args.quant,
                               steps=args.steps, garment=args.garment,
-                              margin_px=args.margin)
+                              margin_px=args.margin, strength=args.strength)
     cv2.imwrite(args.output, result)
     log(f"Salvato: {args.output}")
 
